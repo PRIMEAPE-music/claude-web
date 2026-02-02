@@ -50,7 +50,7 @@ let currentResponseStats = null; // Store stats for adding badge after final ren
 const RENDER_DEBOUNCE_MS = 50; // Balance between responsiveness and performance
 
 // Conversation state
-let currentConversationId = null;
+let currentConversationId = localStorage.getItem("claude-web-conversationId");
 let conversationMessages = [];
 
 // Session persistence state
@@ -340,6 +340,7 @@ function connect(token) {
     // Reset session state
     sessionTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     currentConversationId = null;
+    localStorage.removeItem("claude-web-conversationId");
 
     // Send push subscription and visibility state now that session is established
     if (pushSubscription) {
@@ -370,6 +371,11 @@ function connect(token) {
       });
     }
     socket.emit("visibility-change", { visible: isPageVisible });
+
+    // Restore conversation history from saved conversation
+    if (currentConversationId) {
+      socket.emit("load-conversation", { id: currentConversationId });
+    }
 
     // Check for any buffered response from when we disconnected
     socket.emit("get-buffered-response");
@@ -835,6 +841,7 @@ function connect(token) {
 
   socket.on("conversation-saved", (data) => {
     currentConversationId = data.id;
+    localStorage.setItem("claude-web-conversationId", currentConversationId);
     showToast("Conversation saved");
     socket.emit("list-conversations");
   });
@@ -1122,6 +1129,7 @@ function loadConversation(conversation) {
   messages.innerHTML = "";
   conversationMessages = conversation.messages || [];
   currentConversationId = conversation.id;
+  localStorage.setItem("claude-web-conversationId", currentConversationId);
   sessionTokens = conversation.tokens || {
     input: 0,
     output: 0,
@@ -1522,6 +1530,7 @@ document.getElementById("new-session-btn").onclick = () => {
     // Clear stored session ID to force a fresh start
     currentSessionId = null;
     localStorage.removeItem("claude-web-sessionId");
+    localStorage.removeItem("claude-web-conversationId");
     socket.emit("start-session", {
       workingDir: expandPath(workingDir),
       model: settings.model,
