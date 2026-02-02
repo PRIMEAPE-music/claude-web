@@ -55,6 +55,7 @@ let conversationMessages = [];
 
 // Session persistence state
 let currentSessionId = localStorage.getItem("claude-web-sessionId");
+let isRecoveringFromFailedRestore = false; // Flag to preserve conversation on session fallback
 
 // Image upload state
 let pendingImages = []; // Array of { file, dataUrl, path }
@@ -339,8 +340,20 @@ function connect(token) {
     localStorage.setItem("claude-web-sessionId", currentSessionId);
     // Reset session state
     sessionTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-    currentConversationId = null;
-    localStorage.removeItem("claude-web-conversationId");
+
+    // Check if we're recovering from a failed session restore
+    if (isRecoveringFromFailedRestore) {
+      isRecoveringFromFailedRestore = false;
+      // Preserve conversation - load it from history
+      if (currentConversationId) {
+        socket.emit("load-conversation", { id: currentConversationId });
+      }
+    } else {
+      // Fresh new session - clear conversation
+      currentConversationId = null;
+      localStorage.removeItem("claude-web-conversationId");
+      conversationMessages = [];
+    }
 
     // Send push subscription and visibility state now that session is established
     if (pushSubscription) {
@@ -349,7 +362,6 @@ function connect(token) {
       });
     }
     socket.emit("visibility-change", { visible: isPageVisible });
-    conversationMessages = [];
     updateSessionTokenDisplay();
   });
 
@@ -484,9 +496,11 @@ function connect(token) {
 
   socket.on("session-restore-failed", (data) => {
     console.log("Session restore failed, starting new session");
-    // Clear stale session ID and start fresh
+    // Clear stale session ID but preserve conversation history
     currentSessionId = null;
     localStorage.removeItem("claude-web-sessionId");
+    // Set flag to preserve conversation when session-started fires
+    isRecoveringFromFailedRestore = true;
     socket.emit("start-session", {
       workingDir: expandPath(workingDir),
       model: settings.model,
