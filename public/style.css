@@ -2433,16 +2433,19 @@ header {
 .browser-preview-container {
   flex: 1;
   min-height: 400px;
-  max-height: 60vh;
+  height: 50vh;
   overflow: hidden;
   position: relative;
   background: var(--bg);
+  display: flex;
+  flex-direction: column;
 }
 
 .browser-preview-tab-content {
   display: none;
   width: 100%;
   height: 100%;
+  flex: 1;
 }
 
 .browser-preview-tab-content.active {
@@ -2455,6 +2458,7 @@ header {
 #html-preview-iframe {
   width: 100%;
   height: 100%;
+  min-height: 350px;
   border: none;
   background: white;
   flex: 1;

@@ -14,10 +14,7 @@ let puppeteerClient = null;
  */
 export function getPuppeteerClient() {
   if (!puppeteerClient) {
-    puppeteerClient = new MCPClient("npx", [
-      "-y",
-      "@anthropic-ai/mcp-server-puppeteer",
-    ]);
+    puppeteerClient = new MCPClient("mcp-server-puppeteer", []);
   }
   return puppeteerClient;
 }

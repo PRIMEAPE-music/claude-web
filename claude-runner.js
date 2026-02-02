@@ -18,11 +18,12 @@ function isValidUUID(id) {
 // Ensure sessions directory exists
 mkdir(SESSIONS_DIR, { recursive: true }).catch(() => {});
 
-export function createSession(workingDir = process.env.HOME) {
+export function createSession(workingDir = process.env.HOME, model = "opus") {
   const sessionId = uuidv4();
   sessions.set(sessionId, {
     id: sessionId,
     workingDir,
+    model, // claude model: opus, sonnet, haiku
     process: null,
     history: [],
     // Response buffer for when client disconnects mid-response
@@ -31,6 +32,13 @@ export function createSession(workingDir = process.env.HOME) {
     bufferComplete: false,
   });
   return sessionId;
+}
+
+export function setSessionModel(sessionId, model) {
+  const session = sessions.get(sessionId);
+  if (session) {
+    session.model = model;
+  }
 }
 
 export function getSession(sessionId) {
@@ -72,6 +80,11 @@ export function runClaudeCommand(
   // Note: stream-json requires --verbose when used with --print
   let cmd =
     "claude --print --verbose --output-format stream-json --dangerously-skip-permissions";
+
+  // Add model selection if specified
+  if (session.model) {
+    cmd += ` --model ${session.model}`;
+  }
 
   // Resume session if we have history
   if (session.history.length > 0 && session.claudeSessionId) {
