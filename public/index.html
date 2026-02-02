@@ -81,6 +81,32 @@
           </div>
         </header>
 
+        <!-- Token Bar (collapsible) -->
+        <div id="token-bar" class="token-bar collapsed">
+          <button id="token-bar-toggle" class="token-bar-toggle">
+            <span id="token-bar-summary" class="token-bar-summary"
+              >0 tokens</span
+            >
+            <span class="token-bar-arrow">▼</span>
+          </button>
+          <div id="token-bar-expanded" class="token-bar-expanded">
+            <div class="token-bar-details">
+              <div class="token-bar-context">
+                <div class="context-bar">
+                  <div class="context-fill-cached"></div>
+                  <div class="context-fill-new"></div>
+                </div>
+                <span class="context-text">0/200K</span>
+                <span class="cache-rate">0%⚡</span>
+              </div>
+              <div class="token-bar-breakdown">
+                <span class="token-in">↓0</span>
+                <span class="token-out">↑0</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Search Bar -->
         <div id="search-bar" class="hidden">
           <div class="search-input-wrapper">

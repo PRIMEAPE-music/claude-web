@@ -1373,94 +1373,83 @@ function formatTokens(count) {
   return count.toString();
 }
 
+// Token bar elements
+const tokenBar = document.getElementById("token-bar");
+const tokenBarToggle = document.getElementById("token-bar-toggle");
+const tokenBarSummary = document.getElementById("token-bar-summary");
+
+// Token bar toggle handler
+if (tokenBarToggle) {
+  tokenBarToggle.onclick = () => {
+    tokenBar.classList.toggle("collapsed");
+    if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
+  };
+}
+
 function updateSessionTokenDisplay() {
-  let tokenDisplay = document.getElementById("session-tokens");
-  if (!tokenDisplay) {
-    // Create token display in header
-    const headerRight = document.querySelector(".header-right");
-    if (headerRight) {
-      tokenDisplay = document.createElement("span");
-      tokenDisplay.id = "session-tokens";
-      tokenDisplay.className = "session-tokens";
-      headerRight.insertBefore(tokenDisplay, headerRight.firstChild);
-    }
-  }
-  if (tokenDisplay) {
+  // Update token bar summary
+  if (tokenBarSummary) {
     const total = sessionTokens.input + sessionTokens.output;
-    tokenDisplay.textContent = `${formatTokens(total)} tokens`;
-    tokenDisplay.title = `Input: ${formatTokens(sessionTokens.input)} | Output: ${formatTokens(sessionTokens.output)} | Cache read: ${formatTokens(sessionTokens.cacheRead)} | Cache write: ${formatTokens(sessionTokens.cacheWrite)}`;
+    tokenBarSummary.textContent = `${formatTokens(total)} tokens`;
+    tokenBarSummary.title = `Input: ${formatTokens(sessionTokens.input)} | Output: ${formatTokens(sessionTokens.output)} | Cache read: ${formatTokens(sessionTokens.cacheRead)} | Cache write: ${formatTokens(sessionTokens.cacheWrite)}`;
   }
+
+  // Update breakdown in expanded view
+  const tokenIn = tokenBar?.querySelector(".token-bar-breakdown .token-in");
+  const tokenOut = tokenBar?.querySelector(".token-bar-breakdown .token-out");
+  if (tokenIn) tokenIn.textContent = `↓${formatTokens(sessionTokens.input)}`;
+  if (tokenOut) tokenOut.textContent = `↑${formatTokens(sessionTokens.output)}`;
 }
 
 function updateContextDisplay(usage) {
   const MAX_CONTEXT = 200000; // Claude's context window
-  let contextDisplay = document.getElementById("context-usage");
 
-  if (!contextDisplay) {
-    // Create context display in header
-    const headerRight = document.querySelector(".header-right");
-    if (headerRight) {
-      contextDisplay = document.createElement("div");
-      contextDisplay.id = "context-usage";
-      contextDisplay.className = "context-usage";
-      contextDisplay.innerHTML = `
-        <div class="context-bar">
-          <div class="context-fill-cached"></div>
-          <div class="context-fill-new"></div>
-        </div>
-        <span class="context-text"></span>
-        <span class="cache-rate"></span>
-      `;
-      headerRight.insertBefore(contextDisplay, headerRight.firstChild);
+  if (!tokenBar) return;
+
+  const inputTokens = usage.input_tokens || 0;
+  const cacheRead = usage.cache_read_input_tokens || 0;
+  const contextUsed = inputTokens + cacheRead;
+  const totalPercentage = Math.min((contextUsed / MAX_CONTEXT) * 100, 100);
+  const cachedPercentage = Math.min((cacheRead / MAX_CONTEXT) * 100, 100);
+  const newPercentage = Math.min((inputTokens / MAX_CONTEXT) * 100, 100);
+  const cacheHitRate = contextUsed > 0 ? (cacheRead / contextUsed) * 100 : 0;
+
+  const fillCached = tokenBar.querySelector(".context-fill-cached");
+  const fillNew = tokenBar.querySelector(".context-fill-new");
+  const text = tokenBar.querySelector(".context-text");
+  const cacheRateEl = tokenBar.querySelector(".cache-rate");
+
+  if (fillCached) {
+    fillCached.style.width = `${cachedPercentage}%`;
+  }
+
+  if (fillNew) {
+    fillNew.style.width = `${newPercentage}%`;
+    // Color new tokens based on total usage
+    if (totalPercentage > 80) {
+      fillNew.style.background = "var(--error)";
+    } else if (totalPercentage > 50) {
+      fillNew.style.background = "var(--warning)";
+    } else {
+      fillNew.style.background = "var(--primary)";
     }
   }
 
-  if (contextDisplay) {
-    const inputTokens = usage.input_tokens || 0;
-    const cacheRead = usage.cache_read_input_tokens || 0;
-    const contextUsed = inputTokens + cacheRead;
-    const totalPercentage = Math.min((contextUsed / MAX_CONTEXT) * 100, 100);
-    const cachedPercentage = Math.min((cacheRead / MAX_CONTEXT) * 100, 100);
-    const newPercentage = Math.min((inputTokens / MAX_CONTEXT) * 100, 100);
-    const cacheHitRate = contextUsed > 0 ? (cacheRead / contextUsed) * 100 : 0;
-
-    const fillCached = contextDisplay.querySelector(".context-fill-cached");
-    const fillNew = contextDisplay.querySelector(".context-fill-new");
-    const text = contextDisplay.querySelector(".context-text");
-    const cacheRateEl = contextDisplay.querySelector(".cache-rate");
-
-    if (fillCached) {
-      fillCached.style.width = `${cachedPercentage}%`;
-    }
-
-    if (fillNew) {
-      fillNew.style.width = `${newPercentage}%`;
-      // Color new tokens based on total usage
-      if (totalPercentage > 80) {
-        fillNew.style.background = "var(--error)";
-      } else if (totalPercentage > 50) {
-        fillNew.style.background = "var(--warning)";
-      } else {
-        fillNew.style.background = "var(--primary)";
-      }
-    }
-
-    if (text) {
-      text.textContent = `${formatTokens(contextUsed)}/${formatTokens(MAX_CONTEXT)}`;
-    }
-
-    if (cacheRateEl) {
-      cacheRateEl.textContent = `${Math.round(cacheHitRate)}%⚡`;
-      cacheRateEl.style.color =
-        cacheHitRate > 80
-          ? "var(--success)"
-          : cacheHitRate > 50
-            ? "var(--warning)"
-            : "var(--text-dim)";
-    }
-
-    contextDisplay.title = `Context: ${contextUsed.toLocaleString()} / ${MAX_CONTEXT.toLocaleString()} tokens\nCached: ${cacheRead.toLocaleString()} (${cacheHitRate.toFixed(1)}%)\nNew: ${inputTokens.toLocaleString()}`;
+  if (text) {
+    text.textContent = `${formatTokens(contextUsed)}/${formatTokens(MAX_CONTEXT)}`;
   }
+
+  if (cacheRateEl) {
+    cacheRateEl.textContent = `${Math.round(cacheHitRate)}%⚡`;
+    cacheRateEl.style.color =
+      cacheHitRate > 80
+        ? "var(--success)"
+        : cacheHitRate > 50
+          ? "var(--warning)"
+          : "var(--text-dim)";
+  }
+
+  tokenBar.title = `Context: ${contextUsed.toLocaleString()} / ${MAX_CONTEXT.toLocaleString()} tokens\nCached: ${cacheRead.toLocaleString()} (${cacheHitRate.toFixed(1)}%)\nNew: ${inputTokens.toLocaleString()}`;
 }
 
 function addTokenBadge(messageEl, usage, duration) {
