@@ -56,6 +56,7 @@ let conversationMessages = [];
 // Session persistence state
 let currentSessionId = localStorage.getItem("claude-web-sessionId");
 let isRecoveringFromFailedRestore = false; // Flag to preserve conversation on session fallback
+let pendingBufferedResponseAfterLoad = false; // Flag to chain buffered-response after conversation load
 
 // Image upload state
 let pendingImages = []; // Array of { file, dataUrl, path }
@@ -388,10 +389,8 @@ function connect(token) {
     // Note: We load conversation first, THEN check for buffered response
     // The buffered-response handler will append to the loaded conversation
     if (currentConversationId) {
-      // Load conversation and wait for it before checking buffered response
-      socket.once("conversation-loaded", () => {
-        socket.emit("get-buffered-response");
-      });
+      // Set flag so the normal conversation-loaded handler knows to chain buffered-response
+      pendingBufferedResponseAfterLoad = true;
       socket.emit("load-conversation", { id: currentConversationId });
     } else {
       // No conversation to load, just check for buffered response
@@ -865,6 +864,11 @@ function connect(token) {
 
   socket.on("conversation-loaded", (conversation) => {
     loadConversation(conversation);
+    // If we're restoring after session-restored, now fetch buffered response
+    if (pendingBufferedResponseAfterLoad) {
+      pendingBufferedResponseAfterLoad = false;
+      socket.emit("get-buffered-response");
+    }
   });
 
   socket.on("conversation-saved", (data) => {
