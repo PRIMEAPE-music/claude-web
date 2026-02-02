@@ -384,6 +384,10 @@ function connect(token) {
     );
     showToast(`Resuming response (${data.chunks.length} chunks)...`);
 
+    // Reset tool container state for buffered response replay
+    currentToolContainer = null;
+    toolCount = 0;
+
     // Create or get the current response element
     if (!currentResponse) {
       currentResponse = addMessage("", "assistant");
@@ -952,9 +956,13 @@ function addMessage(content, type, images = []) {
 
 // Create or get the tool container for the current response
 function getOrCreateToolContainer() {
-  if (currentToolContainer) {
+  // Check if existing container is still in the DOM (not stale)
+  if (currentToolContainer && currentToolContainer.parentNode === messages) {
     return currentToolContainer;
   }
+  // Reset if stale reference
+  currentToolContainer = null;
+  toolCount = 0;
 
   const container = document.createElement("div");
   container.className = "tool-container collapsed";
