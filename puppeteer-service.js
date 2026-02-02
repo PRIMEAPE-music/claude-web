@@ -82,13 +82,23 @@ export async function takeScreenshot(options = {}) {
 
     const result = await client.callTool("puppeteer_screenshot", params);
 
-    // The result should contain the base64 image data
+    // The MCP server may return the data URL as a string or in content array
+    // We need to extract the data URL from within the result
     if (result && typeof result === "string") {
-      return { success: true, data: result };
+      // Look for the data URL within the string
+      const dataUrlIndex = result.indexOf("data:image/");
+      if (dataUrlIndex !== -1) {
+        const dataUrl = result.substring(dataUrlIndex);
+        return { success: true, data: dataUrl };
+      }
+      // If it starts with data:image, use as-is
+      if (result.startsWith("data:image/")) {
+        return { success: true, data: result };
+      }
     }
 
-    // Handle content array format
-    if (result?.content) {
+    // Handle content array format (MCP standard format) as fallback
+    if (result?.content && Array.isArray(result.content)) {
       const imageContent = result.content.find((c) => c.type === "image");
       if (imageContent?.data) {
         const dataUrl = `data:${imageContent.mimeType || "image/png"};base64,${imageContent.data}`;
@@ -96,7 +106,15 @@ export async function takeScreenshot(options = {}) {
       }
     }
 
-    return { success: true, data: result };
+    // If result is an object with data property
+    if (result?.data) {
+      if (result.data.startsWith("data:image/")) {
+        return { success: true, data: result.data };
+      }
+      return { success: true, data: `data:image/png;base64,${result.data}` };
+    }
+
+    return { success: false, error: "No image data in screenshot response" };
   } catch (err) {
     console.error("[Puppeteer] Screenshot error:", err.message);
     return { success: false, error: err.message };

@@ -276,9 +276,10 @@ class MCPClient extends EventEmitter {
    * Call an MCP tool
    * @param {string} name - Tool name
    * @param {object} args - Tool arguments
+   * @param {boolean} raw - Return raw result with full content array
    * @returns {Promise<any>}
    */
-  async callTool(name, args = {}) {
+  async callTool(name, args = {}, raw = false) {
     if (!this.initialized) {
       await this.connect();
     }
@@ -288,8 +289,29 @@ class MCPClient extends EventEmitter {
       arguments: args,
     });
 
+    // Return raw result if requested (useful for screenshots, etc.)
+    if (raw) {
+      return result;
+    }
+
     // Extract content from result
     if (result?.content && Array.isArray(result.content)) {
+      // Check for image content first (for screenshots, etc.)
+      const imageContent = result.content.find((c) => c.type === "image");
+      if (imageContent) {
+        // Return full content array when image is present
+        return result;
+      }
+
+      // Check if any text content contains a data URL (puppeteer returns image as text)
+      const dataUrlContent = result.content.find(
+        (c) => c.type === "text" && c.text?.startsWith("data:image/"),
+      );
+      if (dataUrlContent) {
+        // Return the data URL directly
+        return dataUrlContent.text;
+      }
+
       // Return text content if available
       const textContent = result.content.find((c) => c.type === "text");
       if (textContent) {
