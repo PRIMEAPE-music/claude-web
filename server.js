@@ -27,6 +27,31 @@ import {
   invalidateCache as invalidateMemoryCache,
 } from "./memory-service.js";
 import * as puppeteerService from "./puppeteer-service.js";
+import {
+  initDatabase,
+  listProjects,
+  getProject,
+  createProject,
+  updateProject,
+  deleteProject,
+  getActiveProjectId,
+  setActiveProjectId,
+  getActiveProject,
+  listTasks,
+  getTask,
+  createTask,
+  updateTask,
+  deleteTask,
+  listFolders,
+  createFolder,
+  updateFolder,
+  deleteFolder,
+  linkConversation,
+  unlinkConversation,
+  getConversationLink,
+  listConversationLinks,
+  moveConversationToFolder,
+} from "./database.js";
 
 // Configure web-push with VAPID keys
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
@@ -172,8 +197,18 @@ function generateTitle(messages) {
   return `Chat ${new Date().toLocaleDateString()}`;
 }
 
-// Serve static files
-app.use(express.static(join(__dirname, "public")));
+// Serve static files with no-cache for development
+app.use(
+  express.static(join(__dirname, "public"), {
+    etag: false,
+    maxAge: 0,
+    setHeaders: (res) => {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    },
+  }),
+);
 
 // API endpoint for serving screenshots
 app.get("/api/images/:id", async (req, res) => {
@@ -487,7 +522,7 @@ io.on("connection", (socket) => {
     let lastError = null;
     let hasReceivedData = false;
 
-    const attemptCommand = () => {
+    const attemptCommand = async () => {
       hasReceivedData = false; // Reset for each attempt
       return new Promise((resolve) => {
         runClaudeCommand(
@@ -984,6 +1019,640 @@ io.on("connection", (socket) => {
     }
   });
 
+  // ============================================
+  // Project Management Events
+  // ============================================
+
+  socket.on("project-list", () => {
+    try {
+      const projects = listProjects();
+      const activeId = getActiveProjectId();
+      socket.emit("project-list", { projects, activeId });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Project list error:`,
+        err.message,
+      );
+      socket.emit("project-error", { operation: "list", message: err.message });
+    }
+  });
+
+  socket.on("project-get", (data) => {
+    try {
+      if (!data?.id || !isValidUUID(data.id)) {
+        socket.emit("project-error", {
+          operation: "get",
+          message: "Valid project ID required",
+        });
+        return;
+      }
+      const project = getProject(data.id);
+      if (!project) {
+        socket.emit("project-error", {
+          operation: "get",
+          message: "Project not found",
+        });
+        return;
+      }
+      socket.emit("project-data", { project });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Project get error:`,
+        err.message,
+      );
+      socket.emit("project-error", { operation: "get", message: err.message });
+    }
+  });
+
+  socket.on("project-create", (data) => {
+    try {
+      const { name, workingDir, model, contextFiles } = data || {};
+      if (!name || !workingDir) {
+        socket.emit("project-error", {
+          operation: "create",
+          message: "Name and working directory required",
+        });
+        return;
+      }
+      // Validate name length
+      if (name.length > 255) {
+        socket.emit("project-error", {
+          operation: "create",
+          message: "Project name too long (max 255 characters)",
+        });
+        return;
+      }
+      // Validate model against allowlist
+      const validModels = ["opus", "sonnet", "haiku"];
+      const safeModel = validModels.includes(model) ? model : "opus";
+      // Validate working directory path
+      const expandedDir = expandPath(workingDir);
+      const resolvedDir = resolve(expandedDir);
+      if (!resolvedDir.startsWith(HOME) && !resolvedDir.startsWith("/tmp")) {
+        socket.emit("project-error", {
+          operation: "create",
+          message: "Working directory must be within home or /tmp",
+        });
+        return;
+      }
+      // Validate context files paths (if provided)
+      const safeContextFiles = [];
+      if (Array.isArray(contextFiles)) {
+        for (const file of contextFiles.slice(0, 20)) {
+          // Max 20 files
+          if (typeof file !== "string" || file.length > 500) continue;
+          // Resolve relative to project dir or absolute
+          const expandedFile = expandPath(file);
+          const resolvedFile = file.startsWith("/")
+            ? resolve(expandedFile)
+            : resolve(resolvedDir, expandedFile);
+          if (
+            resolvedFile.startsWith(HOME) ||
+            resolvedFile.startsWith("/tmp")
+          ) {
+            safeContextFiles.push(file); // Store original user path
+          }
+        }
+      }
+      const project = createProject({
+        name,
+        workingDir: resolvedDir,
+        model: safeModel,
+        contextFiles: safeContextFiles,
+      });
+      console.log(
+        `[${sessionId || socket.id}] Project created: ${project.name}`,
+      );
+      socket.emit("project-created", { project });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Project create error:`,
+        err.message,
+      );
+      socket.emit("project-error", {
+        operation: "create",
+        message: err.message,
+      });
+    }
+  });
+
+  socket.on("project-update", (data) => {
+    try {
+      const { id, name, workingDir, model, contextFiles, ...otherUpdates } =
+        data || {};
+      if (!id || !isValidUUID(id)) {
+        socket.emit("project-error", {
+          operation: "update",
+          message: "Valid project ID required",
+        });
+        return;
+      }
+      // Build safe updates object
+      const safeUpdates = {};
+      if (name !== undefined) {
+        if (
+          typeof name !== "string" ||
+          name.length > 255 ||
+          name.length === 0
+        ) {
+          socket.emit("project-error", {
+            operation: "update",
+            message: "Invalid project name",
+          });
+          return;
+        }
+        safeUpdates.name = name;
+      }
+      if (workingDir !== undefined) {
+        const expandedDir = expandPath(workingDir);
+        const resolvedDir = resolve(expandedDir);
+        if (!resolvedDir.startsWith(HOME) && !resolvedDir.startsWith("/tmp")) {
+          socket.emit("project-error", {
+            operation: "update",
+            message: "Working directory must be within home or /tmp",
+          });
+          return;
+        }
+        safeUpdates.workingDir = resolvedDir;
+      }
+      if (model !== undefined) {
+        const validModels = ["opus", "sonnet", "haiku"];
+        safeUpdates.model = validModels.includes(model) ? model : "opus";
+      }
+      if (contextFiles !== undefined && Array.isArray(contextFiles)) {
+        const existing = getProject(id);
+        const projectDir =
+          existing?.workingDir || safeUpdates.workingDir || HOME;
+        const safeContextFiles = [];
+        for (const file of contextFiles.slice(0, 20)) {
+          if (typeof file !== "string" || file.length > 500) continue;
+          const expandedFile = expandPath(file);
+          const resolvedFile = file.startsWith("/")
+            ? resolve(expandedFile)
+            : resolve(projectDir, expandedFile);
+          if (
+            resolvedFile.startsWith(HOME) ||
+            resolvedFile.startsWith("/tmp")
+          ) {
+            safeContextFiles.push(file);
+          }
+        }
+        safeUpdates.contextFiles = safeContextFiles;
+      }
+      const project = updateProject(id, safeUpdates);
+      if (!project) {
+        socket.emit("project-error", {
+          operation: "update",
+          message: "Project not found",
+        });
+        return;
+      }
+      console.log(
+        `[${sessionId || socket.id}] Project updated: ${project.name}`,
+      );
+      socket.emit("project-updated", { project });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Project update error:`,
+        err.message,
+      );
+      socket.emit("project-error", {
+        operation: "update",
+        message: err.message,
+      });
+    }
+  });
+
+  socket.on("project-delete", (data) => {
+    try {
+      if (!data?.id || !isValidUUID(data.id)) {
+        socket.emit("project-error", {
+          operation: "delete",
+          message: "Valid project ID required",
+        });
+        return;
+      }
+      // Clear active project if deleting active one
+      const activeId = getActiveProjectId();
+      if (activeId === data.id) {
+        setActiveProjectId(null);
+      }
+      const deleted = deleteProject(data.id);
+      if (!deleted) {
+        socket.emit("project-error", {
+          operation: "delete",
+          message: "Project not found",
+        });
+        return;
+      }
+      console.log(`[${sessionId || socket.id}] Project deleted: ${data.id}`);
+      socket.emit("project-deleted", { id: data.id });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Project delete error:`,
+        err.message,
+      );
+      socket.emit("project-error", {
+        operation: "delete",
+        message: err.message,
+      });
+    }
+  });
+
+  socket.on("project-activate", (data) => {
+    try {
+      const projectId = data?.id || null; // null to deactivate
+      if (projectId) {
+        const project = getProject(projectId);
+        if (!project) {
+          socket.emit("project-error", {
+            operation: "activate",
+            message: "Project not found",
+          });
+          return;
+        }
+      }
+      setActiveProjectId(projectId);
+      const activeProject = projectId ? getProject(projectId) : null;
+      console.log(
+        `[${sessionId || socket.id}] Active project: ${activeProject?.name || "none"}`,
+      );
+      socket.emit("project-activated", { project: activeProject });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Project activate error:`,
+        err.message,
+      );
+      socket.emit("project-error", {
+        operation: "activate",
+        message: err.message,
+      });
+    }
+  });
+
+  socket.on("project-get-active", () => {
+    try {
+      const project = getActiveProject();
+      socket.emit("project-active", { project });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Get active project error:`,
+        err.message,
+      );
+      socket.emit("project-error", {
+        operation: "get-active",
+        message: err.message,
+      });
+    }
+  });
+
+  // ============================================
+  // Task Management Events
+  // ============================================
+
+  socket.on("task-list", (data) => {
+    try {
+      if (!data?.projectId) {
+        socket.emit("task-error", {
+          operation: "list",
+          message: "Project ID required",
+        });
+        return;
+      }
+      const tasks = listTasks(data.projectId, { status: data.status });
+      socket.emit("task-list", { tasks, projectId: data.projectId });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Task list error:`,
+        err.message,
+      );
+      socket.emit("task-error", { operation: "list", message: err.message });
+    }
+  });
+
+  socket.on("task-create", (data) => {
+    try {
+      const { projectId, title, description, priority } = data || {};
+      if (!projectId || !title) {
+        socket.emit("task-error", {
+          operation: "create",
+          message: "Project ID and title required",
+        });
+        return;
+      }
+      const task = createTask({ projectId, title, description, priority });
+      console.log(`[${sessionId || socket.id}] Task created: ${task.title}`);
+      socket.emit("task-created", { task });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Task create error:`,
+        err.message,
+      );
+      socket.emit("task-error", { operation: "create", message: err.message });
+    }
+  });
+
+  socket.on("task-update", (data) => {
+    try {
+      const { id, ...updates } = data || {};
+      if (!id) {
+        socket.emit("task-error", {
+          operation: "update",
+          message: "Task ID required",
+        });
+        return;
+      }
+      const task = updateTask(id, updates);
+      if (!task) {
+        socket.emit("task-error", {
+          operation: "update",
+          message: "Task not found",
+        });
+        return;
+      }
+      console.log(
+        `[${sessionId || socket.id}] Task updated: ${task.title} (${task.status})`,
+      );
+      socket.emit("task-updated", { task });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Task update error:`,
+        err.message,
+      );
+      socket.emit("task-error", { operation: "update", message: err.message });
+    }
+  });
+
+  socket.on("task-delete", (data) => {
+    try {
+      if (!data?.id) {
+        socket.emit("task-error", {
+          operation: "delete",
+          message: "Task ID required",
+        });
+        return;
+      }
+      const deleted = deleteTask(data.id);
+      if (!deleted) {
+        socket.emit("task-error", {
+          operation: "delete",
+          message: "Task not found",
+        });
+        return;
+      }
+      console.log(`[${sessionId || socket.id}] Task deleted: ${data.id}`);
+      socket.emit("task-deleted", { id: data.id });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Task delete error:`,
+        err.message,
+      );
+      socket.emit("task-error", { operation: "delete", message: err.message });
+    }
+  });
+
+  // ============================================
+  // Folder Management Events
+  // ============================================
+
+  socket.on("folder-list", (data) => {
+    try {
+      if (!data?.projectId) {
+        socket.emit("folder-error", {
+          operation: "list",
+          message: "Project ID required",
+        });
+        return;
+      }
+      const folders = listFolders(data.projectId);
+      socket.emit("folder-list", { folders, projectId: data.projectId });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Folder list error:`,
+        err.message,
+      );
+      socket.emit("folder-error", { operation: "list", message: err.message });
+    }
+  });
+
+  socket.on("folder-create", (data) => {
+    try {
+      const { projectId, name } = data || {};
+      if (!projectId || !name) {
+        socket.emit("folder-error", {
+          operation: "create",
+          message: "Project ID and name required",
+        });
+        return;
+      }
+      const folder = createFolder({ projectId, name });
+      console.log(`[${sessionId || socket.id}] Folder created: ${folder.name}`);
+      socket.emit("folder-created", { folder });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Folder create error:`,
+        err.message,
+      );
+      socket.emit("folder-error", {
+        operation: "create",
+        message: err.message,
+      });
+    }
+  });
+
+  socket.on("folder-update", (data) => {
+    try {
+      const { id, ...updates } = data || {};
+      if (!id) {
+        socket.emit("folder-error", {
+          operation: "update",
+          message: "Folder ID required",
+        });
+        return;
+      }
+      const folder = updateFolder(id, updates);
+      if (!folder) {
+        socket.emit("folder-error", {
+          operation: "update",
+          message: "Folder not found",
+        });
+        return;
+      }
+      console.log(`[${sessionId || socket.id}] Folder updated: ${folder.name}`);
+      socket.emit("folder-updated", { folder });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Folder update error:`,
+        err.message,
+      );
+      socket.emit("folder-error", {
+        operation: "update",
+        message: err.message,
+      });
+    }
+  });
+
+  socket.on("folder-delete", (data) => {
+    try {
+      if (!data?.id) {
+        socket.emit("folder-error", {
+          operation: "delete",
+          message: "Folder ID required",
+        });
+        return;
+      }
+      const deleted = deleteFolder(data.id);
+      if (!deleted) {
+        socket.emit("folder-error", {
+          operation: "delete",
+          message: "Folder not found",
+        });
+        return;
+      }
+      console.log(`[${sessionId || socket.id}] Folder deleted: ${data.id}`);
+      socket.emit("folder-deleted", { id: data.id });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Folder delete error:`,
+        err.message,
+      );
+      socket.emit("folder-error", {
+        operation: "delete",
+        message: err.message,
+      });
+    }
+  });
+
+  // ============================================
+  // Conversation Link Events
+  // ============================================
+
+  socket.on("conversation-link", (data) => {
+    try {
+      const { conversationId, projectId, folderId } = data || {};
+      if (!conversationId || !projectId) {
+        socket.emit("conversation-link-error", {
+          message: "Conversation ID and Project ID required",
+        });
+        return;
+      }
+      const link = linkConversation(conversationId, projectId, folderId);
+      console.log(
+        `[${sessionId || socket.id}] Conversation linked: ${conversationId} -> ${projectId}`,
+      );
+      socket.emit("conversation-linked", { link });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Conversation link error:`,
+        err.message,
+      );
+      socket.emit("conversation-link-error", { message: err.message });
+    }
+  });
+
+  socket.on("conversation-unlink", (data) => {
+    try {
+      const { conversationId } = data || {};
+      if (!conversationId) {
+        socket.emit("conversation-link-error", {
+          message: "Conversation ID required",
+        });
+        return;
+      }
+      const unlinked = unlinkConversation(conversationId);
+      if (unlinked) {
+        console.log(
+          `[${sessionId || socket.id}] Conversation unlinked: ${conversationId}`,
+        );
+        socket.emit("conversation-unlinked", { conversationId });
+      } else {
+        socket.emit("conversation-link-error", {
+          message: "Conversation not linked",
+        });
+      }
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Conversation unlink error:`,
+        err.message,
+      );
+      socket.emit("conversation-link-error", { message: err.message });
+    }
+  });
+
+  socket.on("conversation-get-link", (data) => {
+    try {
+      if (!data?.conversationId) {
+        socket.emit("conversation-link-error", {
+          message: "Conversation ID required",
+        });
+        return;
+      }
+      const link = getConversationLink(data.conversationId);
+      socket.emit("conversation-link-data", {
+        link,
+        conversationId: data.conversationId,
+      });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Get conversation link error:`,
+        err.message,
+      );
+      socket.emit("conversation-link-error", { message: err.message });
+    }
+  });
+
+  socket.on("conversation-move-to-folder", (data) => {
+    try {
+      const { conversationId, folderId } = data || {};
+      if (!conversationId) {
+        socket.emit("conversation-link-error", {
+          message: "Conversation ID required",
+        });
+        return;
+      }
+      const moved = moveConversationToFolder(conversationId, folderId);
+      if (!moved) {
+        socket.emit("conversation-link-error", {
+          message: "Conversation not linked to any project",
+        });
+        return;
+      }
+      console.log(
+        `[${sessionId || socket.id}] Conversation moved to folder: ${conversationId} -> ${folderId || "root"}`,
+      );
+      socket.emit("conversation-moved", { conversationId, folderId });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Move conversation error:`,
+        err.message,
+      );
+      socket.emit("conversation-link-error", { message: err.message });
+    }
+  });
+
+  socket.on("conversation-list-by-project", (data) => {
+    try {
+      if (!data?.projectId) {
+        socket.emit("conversation-link-error", {
+          message: "Project ID required",
+        });
+        return;
+      }
+      const links = listConversationLinks(data.projectId, data.folderId);
+      socket.emit("conversation-links-list", {
+        links,
+        projectId: data.projectId,
+        folderId: data.folderId,
+      });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] List conversations by project error:`,
+        err.message,
+      );
+      socket.emit("conversation-link-error", { message: err.message });
+    }
+  });
+
   socket.on("disconnect", () => {
     console.log(`Client disconnected: ${socket.id}`);
     // Clean up rate limiter for this socket
@@ -1001,6 +1670,10 @@ io.on("connection", (socket) => {
 
 // Load persisted sessions and start server
 (async () => {
+  // Initialize SQLite database
+  await initDatabase();
+  console.log("Database initialized");
+
   await loadPersistedSessions();
 
   server.listen(PORT, "0.0.0.0", () => {

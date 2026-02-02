@@ -355,11 +355,13 @@ header {
   background: rgba(0, 0, 0, 0.5);
   z-index: 999;
   opacity: 0;
+  pointer-events: none; /* Prevent invisible overlay from blocking clicks */
   transition: opacity 0.3s;
 }
 
 #sidebar-overlay:not(.hidden) {
   opacity: 1;
+  pointer-events: auto; /* Enable clicks when overlay is visible */
 }
 
 .sidebar-header {
@@ -527,11 +529,13 @@ header {
   justify-content: center;
   z-index: 2000;
   opacity: 0;
+  pointer-events: none; /* Prevent invisible modals from blocking clicks */
   transition: opacity 0.2s;
 }
 
 .modal:not(.hidden) {
   opacity: 1;
+  pointer-events: auto; /* Enable clicks when modal is visible */
 }
 
 .modal-content {
@@ -1212,6 +1216,119 @@ header {
   background: rgba(255, 107, 107, 0.1);
 }
 
+/* History Filter */
+.history-filter {
+  padding: 8px 0;
+  margin-bottom: 8px;
+}
+
+.history-filter select {
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.history-filter select:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+/* History Item Actions */
+.history-item-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.history-item:hover .history-item-actions {
+  opacity: 1;
+}
+
+.history-link-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition:
+    color 0.2s,
+    background 0.2s;
+}
+
+.history-link-btn:hover {
+  color: var(--primary);
+  background: rgba(233, 69, 96, 0.1);
+}
+
+.history-link-btn.linked {
+  color: var(--primary);
+  opacity: 1;
+}
+
+/* History Project Badge */
+.history-project-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  font-size: 10px;
+  background: rgba(233, 69, 96, 0.2);
+  color: var(--primary);
+  border-radius: 4px;
+  margin-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+
+/* Link Dropdown */
+.history-link-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  min-width: 180px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 100;
+}
+
+.history-link-dropdown-item {
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.history-link-dropdown-item:hover {
+  background: var(--surface-2);
+}
+
+.history-link-dropdown-item.unlink {
+  color: var(--error);
+  border-top: 1px solid var(--border);
+}
+
+.history-link-dropdown-header {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+}
+
 /* Input Area */
 #input-area {
   display: flex;
@@ -1502,6 +1619,10 @@ header {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+#image-lightbox.hidden {
+  pointer-events: none; /* Prevent hidden lightbox from blocking clicks */
 }
 
 .lightbox-overlay {
@@ -2788,4 +2909,862 @@ header {
   .viewport-buttons {
     display: none;
   }
+}
+
+/* ============================================
+   Project Management Styles
+   ============================================ */
+
+/* Project Modal */
+.project-modal-content {
+  max-width: 550px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Project Tabs */
+.project-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+
+.project-tab {
+  flex: 1;
+  padding: 12px 16px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  position: relative;
+  transition:
+    color 0.2s,
+    background 0.2s;
+}
+
+.project-tab:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.project-tab.active {
+  color: var(--primary);
+}
+
+.project-tab.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--primary);
+}
+
+/* Project Tab Content */
+.project-tab-content {
+  display: none;
+  flex: 1;
+  overflow: hidden;
+  flex-direction: column;
+}
+
+.project-tab-content.active {
+  display: flex;
+}
+
+/* Project Actions Bar */
+.project-actions-bar {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-action-btn {
+  padding: 10px 16px;
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  transition:
+    border-color 0.2s,
+    color 0.2s;
+  width: 100%;
+}
+
+.project-action-btn:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.project-action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Project List */
+.project-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  min-height: 200px;
+  max-height: 350px;
+}
+
+.project-empty {
+  padding: 32px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* Project Card */
+.project-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  background: var(--surface-2);
+  border-radius: 10px;
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    transform 0.1s;
+  border: 2px solid transparent;
+}
+
+.project-card:hover {
+  background: var(--bg);
+  border-color: var(--primary);
+}
+
+.project-card.active {
+  border-color: var(--success);
+  background: rgba(74, 222, 128, 0.1);
+}
+
+.project-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.project-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-model-badge {
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--primary);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.project-path {
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+
+.project-stats {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.project-card-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.project-card:hover .project-card-actions {
+  opacity: 1;
+}
+
+.project-card-btn {
+  padding: 4px 8px;
+  border: none;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    color 0.2s;
+}
+
+.project-card-btn:hover {
+  background: var(--primary);
+  color: white;
+}
+
+.project-card-btn.activate-btn:hover {
+  background: var(--success);
+}
+
+/* Project Modal Footer */
+.project-modal-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+#active-project-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.indicator-label {
+  color: var(--text-dim);
+}
+
+#active-project-name {
+  color: var(--success);
+  font-weight: 600;
+}
+
+#active-project-name.none {
+  color: var(--text-muted);
+  font-weight: normal;
+}
+
+/* Tasks Tab */
+.tasks-project-info {
+  padding: 10px 16px;
+  background: var(--surface-2);
+  font-size: 13px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+}
+
+#tasks-project-name {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* Task List */
+.task-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  min-height: 200px;
+  max-height: 350px;
+}
+
+/* Task Card */
+.task-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  background: var(--surface-2);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s;
+  border-left: 4px solid var(--text-muted);
+}
+
+.task-card:hover {
+  background: var(--bg);
+}
+
+.task-card.priority-low {
+  border-left-color: var(--text-dim);
+}
+
+.task-card.priority-medium {
+  border-left-color: var(--warning);
+}
+
+.task-card.priority-high {
+  border-left-color: #f97316;
+}
+
+.task-card.priority-critical {
+  border-left-color: var(--error);
+}
+
+.task-card.status-completed {
+  opacity: 0.6;
+  border-left-color: var(--success);
+}
+
+.task-checkbox {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    background 0.2s,
+    border-color 0.2s;
+  flex-shrink: 0;
+}
+
+.task-checkbox:hover {
+  border-color: var(--success);
+}
+
+.task-card.status-completed .task-checkbox {
+  background: var(--success);
+  border-color: var(--success);
+}
+
+.task-card.status-completed .task-checkbox::after {
+  content: "✓";
+  color: white;
+  font-size: 12px;
+}
+
+.task-card.status-in_progress .task-checkbox {
+  border-color: var(--primary);
+  background: rgba(233, 69, 96, 0.2);
+}
+
+.task-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-card.status-completed .task-title {
+  text-decoration: line-through;
+}
+
+.task-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.task-status-badge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.task-status-badge.pending {
+  background: rgba(136, 136, 136, 0.2);
+  color: var(--text-dim);
+}
+
+.task-status-badge.in_progress {
+  background: rgba(233, 69, 96, 0.2);
+  color: var(--primary);
+}
+
+.task-status-badge.completed {
+  background: rgba(74, 222, 128, 0.2);
+  color: var(--success);
+}
+
+.task-priority-badge {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+}
+
+.task-priority-badge.low {
+  background: rgba(136, 136, 136, 0.2);
+  color: var(--text-dim);
+}
+
+.task-priority-badge.medium {
+  background: rgba(251, 191, 36, 0.2);
+  color: var(--warning);
+}
+
+.task-priority-badge.high {
+  background: rgba(249, 115, 22, 0.2);
+  color: #f97316;
+}
+
+.task-priority-badge.critical {
+  background: rgba(255, 107, 107, 0.2);
+  color: var(--error);
+}
+
+/* Task Group Headers */
+.task-group-header {
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  letter-spacing: 0.5px;
+  margin-top: 8px;
+}
+
+.task-group-header:first-child {
+  margin-top: 0;
+}
+
+/* Project Edit Modal */
+.project-edit-modal-content,
+.task-edit-modal-content {
+  max-width: 450px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.project-edit-modal-content .modal-header,
+.task-edit-modal-content .modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-edit-modal-content .modal-header h2,
+.task-edit-modal-content .modal-header h2 {
+  flex: 1;
+}
+
+/* Form Styles */
+.project-form,
+.task-form {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 12px 14px;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  transition: border-color 0.2s;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.form-group textarea {
+  resize: vertical;
+  min-height: 80px;
+  font-family: inherit;
+}
+
+.input-with-btn {
+  display: flex;
+  gap: 8px;
+}
+
+.input-with-btn input {
+  flex: 1;
+}
+
+.browse-btn {
+  padding: 12px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+
+.browse-btn:hover {
+  background: var(--primary);
+  color: white;
+}
+
+/* Context Files List */
+.context-files-list {
+  background: var(--bg);
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  min-height: 60px;
+  max-height: 120px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+
+.context-file-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.context-file-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border-radius: 6px;
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-family: monospace;
+}
+
+.context-file-item:last-child {
+  margin-bottom: 0;
+}
+
+.context-file-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.context-file-remove {
+  padding: 2px 6px;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.context-file-remove:hover {
+  color: var(--error);
+}
+
+.add-context-btn {
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    border-color 0.2s,
+    color 0.2s;
+}
+
+.add-context-btn:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* Edit Footer */
+.project-edit-footer,
+.task-edit-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  gap: 12px;
+}
+
+.footer-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.cancel-btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.cancel-btn:hover {
+  background: var(--bg);
+}
+
+.save-btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  background: var(--primary);
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.save-btn:hover {
+  background: var(--primary-dim);
+}
+
+.save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.danger-btn {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 107, 107, 0.1);
+  color: var(--error);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.danger-btn:hover {
+  background: var(--error);
+  color: white;
+}
+
+/* Task status group - hidden for new tasks */
+#task-status-group.hidden {
+  display: none;
+}
+
+/* Responsive - Project Modals */
+@media (max-width: 600px) {
+  .project-modal-content,
+  .project-edit-modal-content,
+  .task-edit-modal-content {
+    max-width: 100%;
+    max-height: 90vh;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .project-list,
+  .task-list {
+    max-height: 300px;
+  }
+
+  .project-card-actions {
+    opacity: 1;
+  }
+
+  .project-edit-footer,
+  .task-edit-footer {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .footer-actions {
+    width: 100%;
+  }
+
+  .footer-actions button {
+    flex: 1;
+  }
+
+  #project-delete-btn,
+  #task-delete-btn {
+    width: 100%;
+    order: 1;
+  }
+
+  .footer-actions {
+    order: 0;
+  }
+
+  #folder-delete-btn {
+    width: 100%;
+    order: 1;
+  }
+
+  .folder-edit-modal-content {
+    max-width: 100%;
+    max-height: 90vh;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .folder-edit-footer {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .folder-list {
+    max-height: 300px;
+  }
+}
+
+/* ==========================================
+   Folder Styles
+   ========================================== */
+
+/* Folder List */
+.folder-list {
+  overflow-y: auto;
+  min-height: 200px;
+  max-height: 350px;
+}
+
+/* Folder Card */
+.folder-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  background: var(--surface-2);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.2s;
+  border-left: 4px solid var(--text-muted);
+}
+
+.folder-card:hover {
+  background: var(--bg);
+}
+
+.folder-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.folder-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.folder-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.folder-card-actions {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.folder-card:hover .folder-card-actions {
+  opacity: 1;
+}
+
+.folder-card-btn {
+  padding: 6px 10px;
+  font-size: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    border-color 0.2s;
+}
+
+.folder-card-btn:hover {
+  background: var(--bg);
+  border-color: var(--primary);
+}
+
+/* Folder Edit Modal */
+.folder-edit-modal-content {
+  max-width: 400px;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.folder-edit-modal-content .modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.folder-edit-modal-content .modal-header h2 {
+  flex: 1;
+}
+
+.folder-form {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.folder-edit-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
 }

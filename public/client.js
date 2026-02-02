@@ -58,6 +58,20 @@ let currentSessionId = localStorage.getItem("claude-web-sessionId");
 let isRecoveringFromFailedRestore = false; // Flag to preserve conversation on session fallback
 let pendingBufferedResponseAfterLoad = false; // Flag to chain buffered-response after conversation load
 
+// Conversation list state
+let conversationsCache = [];
+let conversationLinksCache = {}; // Map of conversationId -> { projectId, folderId }
+let historyProjectFilter = ""; // Current filter by project ID
+
+// Project state (declared early to avoid TDZ issues on mobile browsers)
+let projectsCache = [];
+let activeProjectId = null;
+
+// History filter element
+const historyProjectFilterSelect = document.getElementById(
+  "history-project-filter",
+);
+
 // Image upload state
 let pendingImages = []; // Array of { file, dataUrl, path }
 let uploadedImagePaths = []; // Paths returned from server after upload
@@ -297,6 +311,9 @@ function connect(token) {
 
     // Setup memory socket listeners immediately on connect
     setupMemorySocketListeners();
+
+    // Load active project on connect
+    loadActiveProject();
 
     // Note: Push subscription and visibility are sent AFTER session is established
     // (in session-started and session-restored handlers) to ensure sessionId is set
@@ -851,7 +868,8 @@ function connect(token) {
 
   // Conversation history handlers
   socket.on("conversations-list", (data) => {
-    renderConversationList(data.conversations);
+    conversationsCache = data.conversations || [];
+    renderConversationList(conversationsCache);
   });
 
   socket.on("conversation-loaded", (conversation) => {
@@ -875,8 +893,38 @@ function connect(token) {
     socket.emit("list-conversations");
   });
 
+  // Conversation linking events
+  socket.on("conversation-linked", (data) => {
+    if (data.link) {
+      conversationLinksCache[data.link.conversationId] = {
+        projectId: data.link.projectId,
+        folderId: data.link.folderId,
+      };
+      renderConversationList(conversationsCache);
+      showToast("Conversation linked to project");
+    }
+  });
+
+  socket.on("conversation-unlinked", (data) => {
+    if (data.conversationId) {
+      delete conversationLinksCache[data.conversationId];
+      renderConversationList(conversationsCache);
+      showToast("Conversation unlinked");
+    }
+  });
+
+  socket.on("conversation-link-error", (data) => {
+    console.error("Conversation link error:", data);
+    showToast(`Link error: ${data.message}`);
+  });
+
   // Load conversation list on connect
   socket.emit("list-conversations");
+
+  // Load projects for history filter (if not already loaded)
+  if (projectsCache.length === 0) {
+    socket.emit("project-list");
+  }
 }
 
 // Message handlers
@@ -1105,23 +1153,50 @@ function renderConversationList(conversations) {
   const historyList = document.getElementById("history-list");
   if (!historyList) return;
 
-  if (conversations.length === 0) {
-    historyList.innerHTML =
-      '<div class="history-empty">No saved conversations</div>';
+  // Filter by project if filter is set
+  let filtered = conversations;
+  if (historyProjectFilter) {
+    filtered = conversations.filter((conv) => {
+      const link = conversationLinksCache[conv.id];
+      return link?.projectId === historyProjectFilter;
+    });
+  }
+
+  if (filtered.length === 0) {
+    if (historyProjectFilter) {
+      historyList.innerHTML =
+        '<div class="history-empty">No conversations in this project</div>';
+    } else {
+      historyList.innerHTML =
+        '<div class="history-empty">No saved conversations</div>';
+    }
     return;
   }
 
-  historyList.innerHTML = conversations
+  historyList.innerHTML = filtered
     .map((conv) => {
       const date = new Date(conv.updatedAt).toLocaleDateString();
       const isActive = conv.id === currentConversationId;
+      const link = conversationLinksCache[conv.id];
+      const linkedProject = link
+        ? projectsCache.find((p) => p.id === link.projectId)
+        : null;
+      const projectBadge = linkedProject
+        ? `<span class="history-project-badge">${escapeHtml(linkedProject.name)}</span>`
+        : "";
+      const linkBtnClass = link
+        ? "history-link-btn linked"
+        : "history-link-btn";
       return `
-        <div class="history-item ${isActive ? "active" : ""}" data-id="${conv.id}">
+        <div class="history-item ${isActive ? "active" : ""}" data-id="${conv.id}" style="position: relative;">
           <div class="history-item-content">
-            <div class="history-title">${escapeHtml(conv.title)}</div>
+            <div class="history-title">${escapeHtml(conv.title)}${projectBadge}</div>
             <div class="history-meta">${conv.messageCount} messages · ${date}</div>
           </div>
-          <button class="history-delete" data-id="${conv.id}" title="Delete">×</button>
+          <div class="history-item-actions">
+            <button class="${linkBtnClass}" data-id="${conv.id}" title="${link ? "Change project" : "Link to project"}">📁</button>
+            <button class="history-delete" data-id="${conv.id}" title="Delete">×</button>
+          </div>
         </div>
       `;
     })
@@ -1130,7 +1205,11 @@ function renderConversationList(conversations) {
   // Add click handlers
   historyList.querySelectorAll(".history-item").forEach((item) => {
     item.onclick = (e) => {
-      if (e.target.classList.contains("history-delete")) return;
+      if (
+        e.target.classList.contains("history-delete") ||
+        e.target.classList.contains("history-link-btn")
+      )
+        return;
       const id = item.dataset.id;
       socket.emit("load-conversation", { id });
       closeSidebar();
@@ -1146,6 +1225,112 @@ function renderConversationList(conversations) {
       }
     };
   });
+
+  // Add link button handlers
+  historyList.querySelectorAll(".history-link-btn").forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      const convId = btn.dataset.id;
+      showConversationLinkDropdown(btn, convId);
+    };
+  });
+}
+
+// Show dropdown to link conversation to project
+function showConversationLinkDropdown(anchorBtn, conversationId) {
+  // Remove any existing dropdown
+  const existing = document.querySelector(".history-link-dropdown");
+  if (existing) existing.remove();
+
+  const link = conversationLinksCache[conversationId];
+  const dropdown = document.createElement("div");
+  dropdown.className = "history-link-dropdown";
+
+  let html = '<div class="history-link-dropdown-header">Link to Project</div>';
+
+  // Add unlink option if linked
+  if (link) {
+    html += `<div class="history-link-dropdown-item unlink" data-action="unlink">Unlink from project</div>`;
+  }
+
+  // Add project options
+  if (projectsCache.length === 0) {
+    html +=
+      '<div class="history-link-dropdown-item" style="color: var(--text-muted)">No projects available</div>';
+  } else {
+    for (const project of projectsCache) {
+      const isCurrent = link?.projectId === project.id;
+      const currentStyle = isCurrent
+        ? ' style="background: var(--surface-2);"'
+        : "";
+      html += `<div class="history-link-dropdown-item"${currentStyle} data-project-id="${escapeHtml(project.id)}">${escapeHtml(project.name)}${isCurrent ? " ✓" : ""}</div>`;
+    }
+  }
+
+  dropdown.innerHTML = html;
+
+  // Position dropdown
+  const rect = anchorBtn.getBoundingClientRect();
+  dropdown.style.position = "fixed";
+  dropdown.style.top = `${rect.bottom + 4}px`;
+  dropdown.style.left = `${rect.left - 150}px`;
+
+  document.body.appendChild(dropdown);
+
+  // Handle clicks
+  dropdown.querySelectorAll(".history-link-dropdown-item").forEach((item) => {
+    item.onclick = (e) => {
+      e.stopPropagation();
+      const projectId = item.dataset.projectId;
+      const action = item.dataset.action;
+
+      if (action === "unlink") {
+        socket.emit("conversation-unlink", { conversationId });
+      } else if (projectId) {
+        socket.emit("conversation-link", { conversationId, projectId });
+      }
+
+      dropdown.remove();
+    };
+  });
+
+  // Close on outside click
+  const closeDropdown = (e) => {
+    if (!dropdown.contains(e.target) && e.target !== anchorBtn) {
+      dropdown.remove();
+      document.removeEventListener("click", closeDropdown);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", closeDropdown), 0);
+}
+
+// Update history filter dropdown with projects
+function updateHistoryProjectFilter() {
+  if (!historyProjectFilterSelect) return;
+
+  const currentValue = historyProjectFilterSelect.value;
+  historyProjectFilterSelect.innerHTML =
+    '<option value="">All Conversations</option>';
+
+  for (const project of projectsCache) {
+    const option = document.createElement("option");
+    option.value = project.id;
+    option.textContent = project.name;
+    historyProjectFilterSelect.appendChild(option);
+  }
+
+  // Restore previous selection if still valid
+  if (currentValue && projectsCache.some((p) => p.id === currentValue)) {
+    historyProjectFilterSelect.value = currentValue;
+  }
+}
+
+// History filter change handler
+if (historyProjectFilterSelect) {
+  historyProjectFilterSelect.onchange = () => {
+    historyProjectFilter = historyProjectFilterSelect.value;
+    renderConversationList(conversationsCache);
+  };
 }
 
 function loadConversation(conversation) {
@@ -3654,3 +3839,1032 @@ document.addEventListener("keydown", (e) => {
     }
   }
 });
+
+// ============================================
+// Project Management
+// ============================================
+
+// Project State (projectsCache and activeProjectId declared at top of file)
+let currentEditingProject = null;
+let currentEditingTask = null;
+let currentEditingFolder = null;
+let tasksCache = [];
+let foldersCache = [];
+let projectActiveTab = "list";
+let projectListenersSetup = false;
+let contextFilesTemp = [];
+
+// Project Elements
+const projectBtn = document.getElementById("project-btn");
+const projectModal = document.getElementById("project-modal");
+const closeProjectModal = document.getElementById("close-project-modal");
+const projectTabs = document.querySelectorAll(".project-tab");
+const projectListTab = document.getElementById("project-list-tab");
+const projectTasksTab = document.getElementById("project-tasks-tab");
+const projectList = document.getElementById("project-list");
+const newProjectBtn = document.getElementById("new-project-btn");
+const activeProjectName = document.getElementById("active-project-name");
+
+// Task Elements
+const tasksProjectName = document.getElementById("tasks-project-name");
+const newTaskBtn = document.getElementById("new-task-btn");
+const taskList = document.getElementById("task-list");
+
+// Folder Elements
+const projectFoldersTab = document.getElementById("project-folders-tab");
+const foldersProjectName = document.getElementById("folders-project-name");
+const newFolderBtn = document.getElementById("new-folder-btn");
+const folderList = document.getElementById("folder-list");
+
+// Folder Edit Modal Elements
+const folderEditModal = document.getElementById("folder-edit-modal");
+const closeFolderEdit = document.getElementById("close-folder-edit");
+const folderEditBack = document.getElementById("folder-edit-back");
+const folderEditTitle = document.getElementById("folder-edit-title");
+const folderNameInput = document.getElementById("folder-name-input");
+const folderDeleteBtn = document.getElementById("folder-delete-btn");
+const folderCancelBtn = document.getElementById("folder-cancel-btn");
+const folderSaveBtn = document.getElementById("folder-save-btn");
+
+// Project Edit Modal Elements
+const projectEditModal = document.getElementById("project-edit-modal");
+const closeProjectEdit = document.getElementById("close-project-edit");
+const projectEditBack = document.getElementById("project-edit-back");
+const projectEditTitle = document.getElementById("project-edit-title");
+const projectNameInput = document.getElementById("project-name-input");
+const projectDirInput = document.getElementById("project-dir-input");
+const projectDirBrowse = document.getElementById("project-dir-browse");
+const projectModelSelect = document.getElementById("project-model-select");
+const projectContextFiles = document.getElementById("project-context-files");
+const addContextFileBtn = document.getElementById("add-context-file-btn");
+const projectDeleteBtn = document.getElementById("project-delete-btn");
+const projectCancelBtn = document.getElementById("project-cancel-btn");
+const projectSaveBtn = document.getElementById("project-save-btn");
+
+// Task Edit Modal Elements
+const taskEditModal = document.getElementById("task-edit-modal");
+const closeTaskEdit = document.getElementById("close-task-edit");
+const taskEditBack = document.getElementById("task-edit-back");
+const taskEditTitle = document.getElementById("task-edit-title");
+const taskTitleInput = document.getElementById("task-title-input");
+const taskDescriptionInput = document.getElementById("task-description-input");
+const taskPrioritySelect = document.getElementById("task-priority-select");
+const taskStatusSelect = document.getElementById("task-status-select");
+const taskStatusGroup = document.getElementById("task-status-group");
+const taskDeleteBtn = document.getElementById("task-delete-btn");
+const taskCancelBtn = document.getElementById("task-cancel-btn");
+const taskSaveBtn = document.getElementById("task-save-btn");
+
+// Open Project Modal
+function openProjectModal() {
+  if (!projectModal) return;
+  projectModal.classList.remove("hidden");
+  if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
+
+  // Setup socket listeners if not already
+  if (socket?.connected && !projectListenersSetup) {
+    setupProjectSocketListeners();
+  }
+
+  // Load projects
+  loadProjects();
+}
+
+// Close Project Modal
+function closeProjectModalFn() {
+  if (projectModal) projectModal.classList.add("hidden");
+}
+
+// Load projects from server
+function loadProjects() {
+  if (!socket?.connected) return;
+  socket.emit("project-list");
+}
+
+// Load tasks for a project
+function loadTasks(projectId) {
+  if (!socket?.connected || !projectId) return;
+  socket.emit("task-list", { projectId });
+}
+
+// Load folders for a project
+function loadFolders(projectId) {
+  if (!socket?.connected || !projectId) return;
+  socket.emit("folder-list", { projectId });
+}
+
+// Switch Project Tab
+function switchProjectTab(tabName) {
+  projectActiveTab = tabName;
+
+  // Update tab buttons
+  projectTabs.forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.tab === tabName);
+  });
+
+  // Update tab content
+  if (projectListTab)
+    projectListTab.classList.toggle("active", tabName === "list");
+  if (projectTasksTab)
+    projectTasksTab.classList.toggle("active", tabName === "tasks");
+  if (projectFoldersTab)
+    projectFoldersTab.classList.toggle("active", tabName === "folders");
+
+  // Load tasks when switching to tasks tab
+  if (tabName === "tasks" && activeProjectId) {
+    loadTasks(activeProjectId);
+  }
+
+  // Load folders when switching to folders tab
+  if (tabName === "folders" && activeProjectId) {
+    loadFolders(activeProjectId);
+  }
+}
+
+// Render Projects List
+function renderProjectsList() {
+  if (!projectList) return;
+
+  if (projectsCache.length === 0) {
+    projectList.innerHTML =
+      '<div class="project-empty">No projects yet. Create one to get started.</div>';
+    return;
+  }
+
+  projectList.innerHTML = projectsCache
+    .map(
+      (project) => `
+    <div class="project-card ${project.id === activeProjectId ? "active" : ""}" data-id="${escapeHtml(project.id)}">
+      <div class="project-card-header">
+        <span class="project-name">${escapeHtml(project.name)}</span>
+        <span class="project-model-badge">${escapeHtml(project.model || "opus")}</span>
+      </div>
+      <div class="project-path">${escapeHtml(project.workingDir || project.working_dir || "")}</div>
+      <div class="project-stats">
+        <span>${project.activeTasks || project.active_tasks || 0} tasks</span>
+        <span>${project.conversationCount || project.conversation_count || 0} conversations</span>
+      </div>
+      <div class="project-card-actions">
+        <button class="project-card-btn activate-btn" data-action="activate" title="${project.id === activeProjectId ? "Deactivate" : "Activate"}">
+          ${project.id === activeProjectId ? "✓ Active" : "Activate"}
+        </button>
+        <button class="project-card-btn" data-action="edit" title="Edit">Edit</button>
+      </div>
+    </div>
+  `,
+    )
+    .join("");
+
+  // Attach click handlers
+  projectList.querySelectorAll(".project-card").forEach((card) => {
+    const projectId = card.dataset.id;
+
+    card.querySelector('[data-action="activate"]').onclick = (e) => {
+      e.stopPropagation();
+      const project = projectsCache.find((p) => p.id === projectId);
+      if (project) {
+        if (projectId === activeProjectId) {
+          // Deactivate
+          socket.emit("project-activate", { id: null });
+        } else {
+          // Activate
+          socket.emit("project-activate", { id: projectId });
+        }
+      }
+    };
+
+    card.querySelector('[data-action="edit"]').onclick = (e) => {
+      e.stopPropagation();
+      const project = projectsCache.find((p) => p.id === projectId);
+      if (project) openProjectEditModal(project);
+    };
+
+    // Clicking card opens tasks
+    card.onclick = () => {
+      const project = projectsCache.find((p) => p.id === projectId);
+      if (project) {
+        // Activate the project if not active
+        if (projectId !== activeProjectId) {
+          socket.emit("project-activate", { id: projectId });
+        }
+        switchProjectTab("tasks");
+      }
+    };
+  });
+
+  // Update active project indicator
+  updateActiveProjectIndicator();
+}
+
+// Update Active Project Indicator
+function updateActiveProjectIndicator() {
+  if (!activeProjectName) return;
+
+  const activeProject = projectsCache.find((p) => p.id === activeProjectId);
+  if (activeProject) {
+    activeProjectName.textContent = activeProject.name;
+    activeProjectName.classList.remove("none");
+  } else {
+    activeProjectName.textContent = "None";
+    activeProjectName.classList.add("none");
+  }
+
+  // Update tasks tab project name
+  if (tasksProjectName) {
+    if (activeProject) {
+      tasksProjectName.textContent = activeProject.name;
+      if (newTaskBtn) newTaskBtn.disabled = false;
+    } else {
+      tasksProjectName.textContent = "No project selected";
+      if (newTaskBtn) newTaskBtn.disabled = true;
+    }
+  }
+
+  // Update folders tab project name
+  if (foldersProjectName) {
+    if (activeProject) {
+      foldersProjectName.textContent = activeProject.name;
+      if (newFolderBtn) newFolderBtn.disabled = false;
+    } else {
+      foldersProjectName.textContent = "No project selected";
+      if (newFolderBtn) newFolderBtn.disabled = true;
+    }
+  }
+}
+
+// Render Tasks List
+function renderTasksList() {
+  if (!taskList) return;
+
+  if (!activeProjectId) {
+    taskList.innerHTML =
+      '<div class="project-empty">Select a project to view tasks.</div>';
+    return;
+  }
+
+  if (tasksCache.length === 0) {
+    taskList.innerHTML =
+      '<div class="project-empty">No tasks yet. Create one to get started.</div>';
+    return;
+  }
+
+  // Group tasks by status
+  const pending = tasksCache.filter((t) => t.status === "pending");
+  const inProgress = tasksCache.filter((t) => t.status === "in_progress");
+  const completed = tasksCache.filter((t) => t.status === "completed");
+
+  const renderTaskCard = (task) => `
+    <div class="task-card status-${task.status} priority-${task.priority}" data-id="${escapeHtml(task.id)}">
+      <div class="task-checkbox" data-action="toggle"></div>
+      <div class="task-content">
+        <div class="task-title">${escapeHtml(task.title)}</div>
+        <div class="task-meta">
+          <span class="task-status-badge ${task.status}">${task.status.replace("_", " ")}</span>
+          <span class="task-priority-badge ${task.priority}">${task.priority}</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  let html = "";
+
+  if (inProgress.length > 0) {
+    html += `<div class="task-group-header">In Progress (${inProgress.length})</div>`;
+    html += inProgress.map(renderTaskCard).join("");
+  }
+
+  if (pending.length > 0) {
+    html += `<div class="task-group-header">Pending (${pending.length})</div>`;
+    html += pending.map(renderTaskCard).join("");
+  }
+
+  if (completed.length > 0) {
+    html += `<div class="task-group-header">Completed (${completed.length})</div>`;
+    html += completed.map(renderTaskCard).join("");
+  }
+
+  taskList.innerHTML = html;
+
+  // Attach click handlers
+  taskList.querySelectorAll(".task-card").forEach((card) => {
+    const taskId = card.dataset.id;
+
+    card.querySelector('[data-action="toggle"]').onclick = (e) => {
+      e.stopPropagation();
+      const task = tasksCache.find((t) => t.id === taskId);
+      if (task) {
+        // Toggle between pending/in_progress/completed
+        let newStatus;
+        if (task.status === "pending") newStatus = "in_progress";
+        else if (task.status === "in_progress") newStatus = "completed";
+        else newStatus = "pending";
+
+        socket.emit("task-update", { id: taskId, status: newStatus });
+      }
+    };
+
+    card.onclick = () => {
+      const task = tasksCache.find((t) => t.id === taskId);
+      if (task) openTaskEditModal(task);
+    };
+  });
+}
+
+// Open Project Edit Modal
+function openProjectEditModal(project = null) {
+  if (!projectEditModal) return;
+
+  currentEditingProject = project;
+  contextFilesTemp = project?.contextFiles || [];
+
+  if (project) {
+    projectEditTitle.textContent = "Edit Project";
+    projectNameInput.value = project.name || "";
+    projectDirInput.value = project.workingDir || project.working_dir || "";
+    projectModelSelect.value = project.model || "opus";
+    projectDeleteBtn.classList.remove("hidden");
+  } else {
+    projectEditTitle.textContent = "New Project";
+    projectNameInput.value = "";
+    projectDirInput.value = workingDir;
+    projectModelSelect.value = "opus";
+    projectDeleteBtn.classList.add("hidden");
+  }
+
+  renderContextFiles();
+  projectEditModal.classList.remove("hidden");
+}
+
+// Close Project Edit Modal
+function closeProjectEditModalFn() {
+  if (projectEditModal) projectEditModal.classList.add("hidden");
+  currentEditingProject = null;
+  contextFilesTemp = [];
+}
+
+// Render Context Files
+function renderContextFiles() {
+  if (!projectContextFiles) return;
+
+  if (contextFilesTemp.length === 0) {
+    projectContextFiles.innerHTML =
+      '<div class="context-file-empty">No context files added</div>';
+    return;
+  }
+
+  projectContextFiles.innerHTML = contextFilesTemp
+    .map(
+      (file, index) => `
+    <div class="context-file-item">
+      <span class="context-file-path">${escapeHtml(file)}</span>
+      <button class="context-file-remove" data-index="${index}">✕</button>
+    </div>
+  `,
+    )
+    .join("");
+
+  // Attach remove handlers
+  projectContextFiles
+    .querySelectorAll(".context-file-remove")
+    .forEach((btn) => {
+      btn.onclick = () => {
+        const index = parseInt(btn.dataset.index);
+        contextFilesTemp.splice(index, 1);
+        renderContextFiles();
+      };
+    });
+}
+
+// Save Project
+function saveProject() {
+  const name = projectNameInput?.value.trim();
+  const workingDir = projectDirInput?.value.trim();
+  const model = projectModelSelect?.value || "opus";
+
+  if (!name || !workingDir) {
+    showToast("Name and working directory are required");
+    return;
+  }
+
+  if (currentEditingProject) {
+    // Update existing project
+    socket.emit("project-update", {
+      id: currentEditingProject.id,
+      name,
+      workingDir,
+      model,
+      contextFiles: contextFilesTemp,
+    });
+  } else {
+    // Create new project
+    socket.emit("project-create", {
+      name,
+      workingDir,
+      model,
+      contextFiles: contextFilesTemp,
+    });
+  }
+
+  closeProjectEditModalFn();
+}
+
+// Delete Project
+function deleteProject() {
+  if (!currentEditingProject) return;
+
+  if (
+    confirm(
+      `Delete project "${currentEditingProject.name}"? This cannot be undone.`,
+    )
+  ) {
+    socket.emit("project-delete", { id: currentEditingProject.id });
+    closeProjectEditModalFn();
+  }
+}
+
+// Open Task Edit Modal
+function openTaskEditModal(task = null) {
+  if (!taskEditModal) return;
+
+  currentEditingTask = task;
+
+  if (task) {
+    taskEditTitle.textContent = "Edit Task";
+    taskTitleInput.value = task.title || "";
+    taskDescriptionInput.value = task.description || "";
+    taskPrioritySelect.value = task.priority || "medium";
+    taskStatusSelect.value = task.status || "pending";
+    taskStatusGroup.classList.remove("hidden");
+    taskDeleteBtn.classList.remove("hidden");
+  } else {
+    taskEditTitle.textContent = "New Task";
+    taskTitleInput.value = "";
+    taskDescriptionInput.value = "";
+    taskPrioritySelect.value = "medium";
+    taskStatusSelect.value = "pending";
+    taskStatusGroup.classList.add("hidden");
+    taskDeleteBtn.classList.add("hidden");
+  }
+
+  taskEditModal.classList.remove("hidden");
+}
+
+// Close Task Edit Modal
+function closeTaskEditModalFn() {
+  if (taskEditModal) taskEditModal.classList.add("hidden");
+  currentEditingTask = null;
+}
+
+// Save Task
+function saveTask() {
+  const title = taskTitleInput?.value.trim();
+  const description = taskDescriptionInput?.value.trim();
+  const priority = taskPrioritySelect?.value || "medium";
+  const status = taskStatusSelect?.value || "pending";
+
+  if (!title) {
+    showToast("Task title is required");
+    return;
+  }
+
+  if (currentEditingTask) {
+    // Update existing task
+    socket.emit("task-update", {
+      id: currentEditingTask.id,
+      title,
+      description,
+      priority,
+      status,
+    });
+  } else {
+    // Create new task
+    if (!activeProjectId) {
+      showToast("No project selected");
+      return;
+    }
+    socket.emit("task-create", {
+      projectId: activeProjectId,
+      title,
+      description,
+      priority,
+    });
+  }
+
+  closeTaskEditModalFn();
+}
+
+// Delete Task
+function deleteTask() {
+  if (!currentEditingTask) return;
+
+  if (confirm(`Delete task "${currentEditingTask.title}"?`)) {
+    socket.emit("task-delete", { id: currentEditingTask.id });
+    closeTaskEditModalFn();
+  }
+}
+
+// Render Folders List
+function renderFoldersList() {
+  if (!folderList) return;
+
+  if (!activeProjectId) {
+    folderList.innerHTML =
+      '<div class="project-empty">Select a project to view folders.</div>';
+    return;
+  }
+
+  if (foldersCache.length === 0) {
+    folderList.innerHTML =
+      '<div class="project-empty">No folders yet. Create one to organize conversations.</div>';
+    return;
+  }
+
+  folderList.innerHTML = foldersCache
+    .map(
+      (folder) => `
+    <div class="folder-card" data-id="${escapeHtml(folder.id)}">
+      <span class="folder-icon">📂</span>
+      <div class="folder-content">
+        <div class="folder-name">${escapeHtml(folder.name)}</div>
+        <div class="folder-meta">
+          <span>${folder.conversationCount || 0} conversations</span>
+        </div>
+      </div>
+      <div class="folder-card-actions">
+        <button class="folder-card-btn" data-action="edit" title="Edit">Edit</button>
+      </div>
+    </div>
+  `,
+    )
+    .join("");
+
+  // Attach click handlers
+  folderList.querySelectorAll(".folder-card").forEach((card) => {
+    const folderId = card.dataset.id;
+
+    card.querySelector('[data-action="edit"]').onclick = (e) => {
+      e.stopPropagation();
+      const folder = foldersCache.find((f) => f.id === folderId);
+      if (folder) openFolderEditModal(folder);
+    };
+
+    // Clicking card could show conversations in this folder (future feature)
+    card.onclick = () => {
+      const folder = foldersCache.find((f) => f.id === folderId);
+      if (folder) openFolderEditModal(folder);
+    };
+  });
+}
+
+// Open Folder Edit Modal
+function openFolderEditModal(folder = null) {
+  if (!folderEditModal) return;
+
+  currentEditingFolder = folder;
+
+  if (folder) {
+    if (folderEditTitle) folderEditTitle.textContent = "Edit Folder";
+    if (folderNameInput) folderNameInput.value = folder.name || "";
+    if (folderDeleteBtn) folderDeleteBtn.classList.remove("hidden");
+  } else {
+    if (folderEditTitle) folderEditTitle.textContent = "New Folder";
+    if (folderNameInput) folderNameInput.value = "";
+    if (folderDeleteBtn) folderDeleteBtn.classList.add("hidden");
+  }
+
+  folderEditModal.classList.remove("hidden");
+}
+
+// Close Folder Edit Modal
+function closeFolderEditModalFn() {
+  if (folderEditModal) folderEditModal.classList.add("hidden");
+  currentEditingFolder = null;
+}
+
+// Save Folder
+function saveFolder() {
+  const name = folderNameInput?.value.trim();
+
+  if (!name) {
+    showToast("Folder name is required");
+    return;
+  }
+
+  if (!activeProjectId) {
+    showToast("Please select a project first");
+    return;
+  }
+
+  if (currentEditingFolder) {
+    // Update existing folder
+    socket.emit("folder-update", {
+      id: currentEditingFolder.id,
+      name,
+    });
+  } else {
+    // Create new folder
+    socket.emit("folder-create", {
+      projectId: activeProjectId,
+      name,
+    });
+  }
+
+  closeFolderEditModalFn();
+}
+
+// Delete Folder
+function deleteFolder() {
+  if (!currentEditingFolder) return;
+
+  if (
+    confirm(
+      `Delete folder "${currentEditingFolder.name}"? Conversations will be moved to the root.`,
+    )
+  ) {
+    socket.emit("folder-delete", { id: currentEditingFolder.id });
+    closeFolderEditModalFn();
+  }
+}
+
+// Setup Project Socket Listeners
+function setupProjectSocketListeners() {
+  if (!socket || projectListenersSetup) return;
+  projectListenersSetup = true;
+
+  socket.on("project-list", (data) => {
+    projectsCache = data.projects || [];
+    activeProjectId = data.activeId || null;
+    renderProjectsList();
+
+    // Update history filter dropdown
+    updateHistoryProjectFilter();
+
+    // If on tasks tab and we have an active project, load tasks
+    if (projectActiveTab === "tasks" && activeProjectId) {
+      loadTasks(activeProjectId);
+    }
+
+    // If on folders tab and we have an active project, load folders
+    if (projectActiveTab === "folders" && activeProjectId) {
+      loadFolders(activeProjectId);
+    }
+  });
+
+  socket.on("project-created", (data) => {
+    if (data.project) {
+      projectsCache.push(data.project);
+      renderProjectsList();
+      updateHistoryProjectFilter();
+      showToast(`Project "${data.project.name}" created`);
+    }
+  });
+
+  socket.on("project-updated", (data) => {
+    if (data.project) {
+      const index = projectsCache.findIndex((p) => p.id === data.project.id);
+      if (index >= 0) {
+        projectsCache[index] = data.project;
+        renderProjectsList();
+      }
+      showToast(`Project "${data.project.name}" updated`);
+    }
+  });
+
+  socket.on("project-deleted", (data) => {
+    if (data.id) {
+      projectsCache = projectsCache.filter((p) => p.id !== data.id);
+      if (activeProjectId === data.id) {
+        activeProjectId = null;
+      }
+      renderProjectsList();
+      updateHistoryProjectFilter();
+      // Clear filter if the deleted project was selected
+      if (historyProjectFilter === data.id) {
+        historyProjectFilter = "";
+        if (historyProjectFilterSelect) historyProjectFilterSelect.value = "";
+        renderConversationList(conversationsCache);
+      }
+      showToast("Project deleted");
+    }
+  });
+
+  socket.on("project-activated", (data) => {
+    activeProjectId = data.project?.id || null;
+    renderProjectsList();
+    updateActiveProjectIndicator();
+
+    if (data.project) {
+      showToast(`Switched to "${data.project.name}"`);
+
+      // Update working directory to match project
+      workingDir =
+        data.project.workingDir || data.project.working_dir || workingDir;
+      workingDirDisplay.textContent = shortenPath(workingDir);
+      localStorage.setItem("claude-web-workingDir", workingDir);
+      if (dirInput) dirInput.value = workingDir;
+
+      // Update model to match project
+      if (data.project.model) {
+        settings.model = data.project.model;
+        localStorage.setItem("claude-model", data.project.model);
+        const modelSelect = document.getElementById("model-select");
+        if (modelSelect) modelSelect.value = data.project.model;
+      }
+
+      // Load tasks for the newly active project
+      if (projectActiveTab === "tasks") {
+        loadTasks(activeProjectId);
+      }
+
+      // Load folders for the newly active project
+      if (projectActiveTab === "folders") {
+        loadFolders(activeProjectId);
+      }
+    } else {
+      showToast("Project deactivated");
+      tasksCache = [];
+      foldersCache = [];
+      renderTasksList();
+      renderFoldersList();
+    }
+  });
+
+  socket.on("project-active", (data) => {
+    activeProjectId = data.project?.id || null;
+    renderProjectsList(); // Re-render project cards with correct active state
+    updateActiveProjectIndicator();
+
+    // Apply project settings on startup (if project is active)
+    if (data.project) {
+      // Update working directory to match project
+      const projectDir = data.project.workingDir || data.project.working_dir;
+      if (projectDir) {
+        workingDir = projectDir;
+        workingDirDisplay.textContent = shortenPath(workingDir);
+        localStorage.setItem("claude-web-workingDir", workingDir);
+        if (dirInput) dirInput.value = workingDir;
+      }
+
+      // Update model to match project
+      if (data.project.model) {
+        settings.model = data.project.model;
+        localStorage.setItem("claude-model", data.project.model);
+        const modelSelect = document.getElementById("model-select");
+        if (modelSelect) modelSelect.value = data.project.model;
+      }
+    }
+  });
+
+  socket.on("project-error", (data) => {
+    console.error("Project error:", data);
+    showToast(`Project error: ${data.message}`);
+  });
+
+  // Task events
+  socket.on("task-list", (data) => {
+    tasksCache = data.tasks || [];
+    renderTasksList();
+  });
+
+  socket.on("task-created", (data) => {
+    if (data.task && data.task.projectId === activeProjectId) {
+      tasksCache.push(data.task);
+      renderTasksList();
+      showToast(`Task "${data.task.title}" created`);
+    }
+    // Refresh project list to update task counts
+    loadProjects();
+  });
+
+  socket.on("task-updated", (data) => {
+    if (data.task) {
+      const index = tasksCache.findIndex((t) => t.id === data.task.id);
+      if (index >= 0) {
+        tasksCache[index] = data.task;
+        renderTasksList();
+      }
+    }
+  });
+
+  socket.on("task-deleted", (data) => {
+    if (data.id) {
+      tasksCache = tasksCache.filter((t) => t.id !== data.id);
+      renderTasksList();
+      showToast("Task deleted");
+    }
+    // Refresh project list to update task counts
+    loadProjects();
+  });
+
+  socket.on("task-error", (data) => {
+    console.error("Task error:", data);
+    showToast(`Task error: ${data.message}`);
+  });
+
+  // Folder events
+  socket.on("folder-list", (data) => {
+    foldersCache = data.folders || [];
+    renderFoldersList();
+  });
+
+  socket.on("folder-created", (data) => {
+    if (data.folder && data.folder.projectId === activeProjectId) {
+      foldersCache.push(data.folder);
+      renderFoldersList();
+      showToast(`Folder "${data.folder.name}" created`);
+    }
+  });
+
+  socket.on("folder-updated", (data) => {
+    if (data.folder) {
+      const index = foldersCache.findIndex((f) => f.id === data.folder.id);
+      if (index >= 0) {
+        foldersCache[index] = data.folder;
+        renderFoldersList();
+      }
+      showToast(`Folder "${data.folder.name}" updated`);
+    }
+  });
+
+  socket.on("folder-deleted", (data) => {
+    if (data.id) {
+      foldersCache = foldersCache.filter((f) => f.id !== data.id);
+      renderFoldersList();
+      showToast("Folder deleted");
+    }
+  });
+
+  socket.on("folder-error", (data) => {
+    console.error("Folder error:", data);
+    showToast(`Folder error: ${data.message}`);
+  });
+
+  // Reset flag on disconnect
+  socket.on("disconnect", () => {
+    projectListenersSetup = false;
+  });
+}
+
+// Event Handlers - Project Modal
+if (projectBtn) {
+  projectBtn.onclick = openProjectModal;
+}
+
+if (closeProjectModal) {
+  closeProjectModal.onclick = closeProjectModalFn;
+}
+
+if (projectModal) {
+  projectModal.onclick = (e) => {
+    if (e.target === projectModal) closeProjectModalFn();
+  };
+}
+
+if (newProjectBtn) {
+  newProjectBtn.onclick = () => openProjectEditModal(null);
+}
+
+projectTabs.forEach((tab) => {
+  tab.onclick = () => switchProjectTab(tab.dataset.tab);
+});
+
+// Event Handlers - Project Edit Modal
+if (closeProjectEdit) {
+  closeProjectEdit.onclick = closeProjectEditModalFn;
+}
+
+if (projectEditBack) {
+  projectEditBack.onclick = closeProjectEditModalFn;
+}
+
+if (projectEditModal) {
+  projectEditModal.onclick = (e) => {
+    if (e.target === projectEditModal) closeProjectEditModalFn();
+  };
+}
+
+if (projectCancelBtn) {
+  projectCancelBtn.onclick = closeProjectEditModalFn;
+}
+
+if (projectSaveBtn) {
+  projectSaveBtn.onclick = saveProject;
+}
+
+if (projectDeleteBtn) {
+  projectDeleteBtn.onclick = deleteProject;
+}
+
+if (addContextFileBtn) {
+  addContextFileBtn.onclick = () => {
+    const file = prompt("Enter file path (relative to project or absolute):");
+    if (file && file.trim()) {
+      contextFilesTemp.push(file.trim());
+      renderContextFiles();
+    }
+  };
+}
+
+if (projectDirBrowse) {
+  projectDirBrowse.onclick = () => {
+    // Use current value or working dir as starting point
+    const currentPath = projectDirInput.value || workingDir;
+    const newPath = prompt("Enter directory path:", currentPath);
+    if (newPath && newPath.trim()) {
+      projectDirInput.value = newPath.trim();
+    }
+  };
+}
+
+// Event Handlers - Task Edit Modal
+if (newTaskBtn) {
+  newTaskBtn.onclick = () => {
+    if (activeProjectId) {
+      openTaskEditModal(null);
+    } else {
+      showToast("Select a project first");
+    }
+  };
+}
+
+if (closeTaskEdit) {
+  closeTaskEdit.onclick = closeTaskEditModalFn;
+}
+
+if (taskEditBack) {
+  taskEditBack.onclick = closeTaskEditModalFn;
+}
+
+if (taskEditModal) {
+  taskEditModal.onclick = (e) => {
+    if (e.target === taskEditModal) closeTaskEditModalFn();
+  };
+}
+
+if (taskCancelBtn) {
+  taskCancelBtn.onclick = closeTaskEditModalFn;
+}
+
+if (taskSaveBtn) {
+  taskSaveBtn.onclick = saveTask;
+}
+
+if (taskDeleteBtn) {
+  taskDeleteBtn.onclick = deleteTask;
+}
+
+// Event Handlers - Folder Edit Modal
+if (newFolderBtn) {
+  newFolderBtn.onclick = () => openFolderEditModal(null);
+}
+
+if (closeFolderEdit) {
+  closeFolderEdit.onclick = closeFolderEditModalFn;
+}
+
+if (folderEditBack) {
+  folderEditBack.onclick = closeFolderEditModalFn;
+}
+
+if (folderEditModal) {
+  folderEditModal.onclick = (e) => {
+    if (e.target === folderEditModal) closeFolderEditModalFn();
+  };
+}
+
+if (folderCancelBtn) {
+  folderCancelBtn.onclick = closeFolderEditModalFn;
+}
+
+if (folderSaveBtn) {
+  folderSaveBtn.onclick = saveFolder;
+}
+
+if (folderDeleteBtn) {
+  folderDeleteBtn.onclick = deleteFolder;
+}
+
+// Keyboard shortcut: Escape closes project modals
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (folderEditModal && !folderEditModal.classList.contains("hidden")) {
+      closeFolderEditModalFn();
+    } else if (taskEditModal && !taskEditModal.classList.contains("hidden")) {
+      closeTaskEditModalFn();
+    } else if (
+      projectEditModal &&
+      !projectEditModal.classList.contains("hidden")
+    ) {
+      closeProjectEditModalFn();
+    } else if (projectModal && !projectModal.classList.contains("hidden")) {
+      closeProjectModalFn();
+    }
+  }
+});
+
+// Load active project on connect
+function loadActiveProject() {
+  if (socket?.connected) {
+    socket.emit("project-get-active");
+  }
+}

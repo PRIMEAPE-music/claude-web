@@ -9,6 +9,10 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@capacitor/android": "^8.0.2",
+    "@capacitor/cli": "^8.0.2",
+    "@capacitor/core": "^8.0.2",
+    "better-sqlite3": "^12.6.2",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "socket.io": "^4.8.1",

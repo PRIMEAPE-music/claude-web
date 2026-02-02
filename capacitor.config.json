@@ -1,0 +1,12 @@
+{
+  "appId": "com.primeape.claudeweb",
+  "appName": "Claude Web",
+  "webDir": "public",
+  "server": {
+    "url": "http://100.91.30.120:3001",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

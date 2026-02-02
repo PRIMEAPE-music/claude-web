@@ -1,8 +1,16 @@
 import { spawn } from "child_process";
 import { v4 as uuidv4 } from "uuid";
-import { readdir, readFile, writeFile, mkdir, unlink } from "fs/promises";
+import {
+  readdir,
+  readFile,
+  writeFile,
+  mkdir,
+  unlink,
+  access,
+} from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
+import { constants } from "fs";
 
 const sessions = new Map();
 const SESSIONS_DIR = join(homedir(), ".claude", "claude-web", "sessions");
@@ -45,6 +53,16 @@ export function getSession(sessionId) {
   return sessions.get(sessionId);
 }
 
+// Check if directory exists and is accessible
+async function directoryExists(dir) {
+  try {
+    await access(dir, constants.R_OK | constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Escape string for shell
 function shellEscape(str) {
   return `'${str.replace(/'/g, "'\\''")}'`;
@@ -57,7 +75,7 @@ function truncateOutput(str, maxLen = 500) {
   return str.substring(0, maxLen) + `\n... (${str.length - maxLen} more chars)`;
 }
 
-export function runClaudeCommand(
+export async function runClaudeCommand(
   sessionId,
   prompt,
   imagePaths,
@@ -76,10 +94,20 @@ export function runClaudeCommand(
     session.process.kill();
   }
 
+  // Validate working directory exists, fall back to HOME if not
+  let workingDir = session.workingDir;
+  if (!(await directoryExists(workingDir))) {
+    console.warn(
+      `Working directory does not exist: ${workingDir}, falling back to HOME`,
+    );
+    workingDir = homedir();
+  }
+
   // Build command string - use stream-json for real-time token streaming
   // Note: stream-json requires --verbose when used with --print
+  // --include-partial-messages ensures agent/Task tool output is streamed
   let cmd =
-    "claude --print --verbose --output-format stream-json --dangerously-skip-permissions";
+    "claude --print --verbose --output-format stream-json --include-partial-messages --dangerously-skip-permissions";
 
   // Add model selection if specified
   if (session.model) {
@@ -104,9 +132,10 @@ export function runClaudeCommand(
   cmd += ` ${shellEscape(finalPrompt)}`;
 
   console.log(`Running command: ${cmd.substring(0, 100)}...`);
+  console.log(`Working directory: ${workingDir}`);
 
   const proc = spawn("sh", ["-c", cmd], {
-    cwd: session.workingDir,
+    cwd: workingDir,
     env: { ...process.env, FORCE_COLOR: "0" },
     stdio: ["ignore", "pipe", "pipe"],
     detached: false,
