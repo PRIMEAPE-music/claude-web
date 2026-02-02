@@ -1,0 +1,802 @@
+import "dotenv/config";
+import express from "express";
+import { createServer } from "http";
+import { Server } from "socket.io";
+import { fileURLToPath } from "url";
+import { dirname, join, resolve } from "path";
+import { readdir, stat, readFile, writeFile, unlink, mkdir } from "fs/promises";
+import { homedir } from "os";
+import webpush from "web-push";
+import { socketAuthMiddleware } from "./auth.js";
+import {
+  createSession,
+  runClaudeCommand,
+  stopSession,
+  loadPersistedSessions,
+  listSessions,
+  restoreSession,
+  getSession,
+  getBufferedResponse,
+  clearBuffer,
+} from "./claude-runner.js";
+
+// Configure web-push with VAPID keys
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT || "mailto:claude-web@localhost",
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY,
+  );
+  console.log("Push notifications enabled");
+} else {
+  console.log("Push notifications disabled (no VAPID keys)");
+}
+
+// Store push subscriptions per SESSION (sessionId -> subscription)
+// This persists even when socket disconnects (e.g., phone screen off)
+const pushSubscriptions = new Map();
+// Track client visibility per SESSION (sessionId -> boolean)
+const clientVisibility = new Map();
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const app = express();
+const server = createServer(app);
+const io = new Server(server);
+
+const PORT = process.env.PORT || 3000;
+const HOME = homedir();
+const HISTORY_DIR = join(HOME, ".claude", "claude-web", "history");
+const UPLOADS_DIR = join(HOME, ".claude", "claude-web", "uploads");
+const SCREENSHOTS_DIR = join(HOME, ".claude", "claude-web", "screenshots");
+const SCREENSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Ensure directories exist
+mkdir(UPLOADS_DIR, { recursive: true }).catch(() => {});
+mkdir(SCREENSHOTS_DIR, { recursive: true }).catch(() => {});
+
+// Rate limiting configuration
+const RATE_LIMIT_WINDOW_MS =
+  parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60000; // 1 minute
+const RATE_LIMIT_MAX_REQUESTS =
+  parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 20; // 20 requests per window
+
+// Retry configuration
+const RETRY_MAX_ATTEMPTS = parseInt(process.env.RETRY_MAX_ATTEMPTS) || 3;
+const RETRY_BASE_DELAY_MS = parseInt(process.env.RETRY_BASE_DELAY_MS) || 1000; // 1 second
+const RETRY_MAX_DELAY_MS = parseInt(process.env.RETRY_MAX_DELAY_MS) || 30000; // 30 seconds
+
+// Helper: sleep for ms
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Helper: calculate exponential backoff delay
+function getRetryDelay(attempt) {
+  const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+  // Add jitter (±10%) to prevent thundering herd
+  const jitter = delay * 0.2 * (Math.random() - 0.5);
+  return Math.min(delay + jitter, RETRY_MAX_DELAY_MS);
+}
+
+// Track active retry operations per session (to prevent concurrent retries)
+const activeRetries = new Map(); // sessionId -> AbortController
+
+// Rate limiter class using sliding window
+class RateLimiter {
+  constructor(windowMs, maxRequests) {
+    this.windowMs = windowMs;
+    this.maxRequests = maxRequests;
+    this.requests = new Map(); // socketId -> timestamp array
+  }
+
+  isAllowed(socketId) {
+    const now = Date.now();
+    const windowStart = now - this.windowMs;
+
+    // Get or create request history for this socket
+    let history = this.requests.get(socketId) || [];
+
+    // Filter out old requests outside the window
+    history = history.filter((timestamp) => timestamp > windowStart);
+
+    // Check if under limit
+    if (history.length >= this.maxRequests) {
+      this.requests.set(socketId, history);
+      return {
+        allowed: false,
+        remaining: 0,
+        resetIn: Math.ceil((history[0] + this.windowMs - now) / 1000),
+      };
+    }
+
+    // Add current request
+    history.push(now);
+    this.requests.set(socketId, history);
+
+    return {
+      allowed: true,
+      remaining: this.maxRequests - history.length,
+      resetIn: Math.ceil(this.windowMs / 1000),
+    };
+  }
+
+  cleanup(socketId) {
+    this.requests.delete(socketId);
+  }
+}
+
+const rateLimiter = new RateLimiter(
+  RATE_LIMIT_WINDOW_MS,
+  RATE_LIMIT_MAX_REQUESTS,
+);
+
+// Ensure history directory exists
+mkdir(HISTORY_DIR, { recursive: true }).catch(() => {});
+
+// Validate ID format (alphanumeric, dashes, underscores only - no path traversal)
+function isValidId(id) {
+  if (!id || typeof id !== "string") return false;
+  // Only allow alphanumeric, dashes, underscores, dots (no slashes or ..)
+  return /^[a-zA-Z0-9_-]+$/.test(id) && id.length <= 100;
+}
+
+// Validate UUID format specifically
+function isValidUUID(id) {
+  if (!id || typeof id !== "string") return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    id,
+  );
+}
+
+// Expand ~ in paths
+function expandPath(path) {
+  if (path.startsWith("~")) {
+    return path.replace("~", HOME);
+  }
+  return path;
+}
+
+// Generate title from first user message
+function generateTitle(messages) {
+  const firstUser = messages?.find((m) => m.type === "user");
+  if (firstUser?.content) {
+    const text = firstUser.content.substring(0, 50);
+    return text.length < firstUser.content.length ? text + "..." : text;
+  }
+  return `Chat ${new Date().toLocaleDateString()}`;
+}
+
+// Serve static files
+app.use(express.static(join(__dirname, "public")));
+
+// API endpoint for serving screenshots
+app.get("/api/images/:id", async (req, res) => {
+  const { id } = req.params;
+
+  // Validate ID format (prevent path traversal) - allow alphanumeric, dashes, underscores, and .png/.jpg extension
+  if (!/^[a-zA-Z0-9_-]+\.(png|jpg|jpeg|gif|webp)$/i.test(id)) {
+    return res.status(400).json({ error: "Invalid image ID" });
+  }
+
+  const filepath = join(SCREENSHOTS_DIR, id);
+
+  try {
+    const data = await readFile(filepath);
+
+    // Determine content type from extension
+    const ext = id.split(".").pop().toLowerCase();
+    const contentTypes = {
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      gif: "image/gif",
+      webp: "image/webp",
+    };
+
+    res.setHeader("Content-Type", contentTypes[ext] || "image/png");
+    res.setHeader("Cache-Control", "public, max-age=3600"); // Cache for 1 hour
+    res.send(data);
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      res.status(404).json({ error: "Image not found" });
+    } else {
+      res.status(500).json({ error: "Failed to read image" });
+    }
+  }
+});
+
+// API endpoint to list available screenshots
+app.get("/api/images", async (req, res) => {
+  try {
+    const files = await readdir(SCREENSHOTS_DIR);
+    const images = [];
+
+    for (const file of files) {
+      if (!/\.(png|jpg|jpeg|gif|webp)$/i.test(file)) continue;
+      try {
+        const filepath = join(SCREENSHOTS_DIR, file);
+        const stats = await stat(filepath);
+        images.push({
+          id: file,
+          url: `/api/images/${file}`,
+          size: stats.size,
+          created: stats.mtime,
+        });
+      } catch (e) {
+        // Skip files we can't stat
+      }
+    }
+
+    // Sort by most recent first
+    images.sort((a, b) => new Date(b.created) - new Date(a.created));
+    res.json({ images });
+  } catch (err) {
+    res.json({ images: [] });
+  }
+});
+
+// Cleanup old screenshots periodically
+async function cleanupOldScreenshots() {
+  try {
+    const files = await readdir(SCREENSHOTS_DIR);
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const file of files) {
+      if (!/\.(png|jpg|jpeg|gif|webp)$/i.test(file)) continue;
+      try {
+        const filepath = join(SCREENSHOTS_DIR, file);
+        const stats = await stat(filepath);
+        if (now - stats.mtimeMs > SCREENSHOT_MAX_AGE_MS) {
+          await unlink(filepath);
+          cleaned++;
+        }
+      } catch (e) {
+        // Skip files we can't process
+      }
+    }
+
+    if (cleaned > 0) {
+      console.log(`Cleaned up ${cleaned} old screenshots`);
+    }
+  } catch (err) {
+    // Ignore cleanup errors
+  }
+}
+
+// Run cleanup every hour
+setInterval(cleanupOldScreenshots, 60 * 60 * 1000);
+// Also run on startup
+cleanupOldScreenshots();
+
+// Socket.io authentication
+io.use(socketAuthMiddleware);
+
+io.on("connection", (socket) => {
+  console.log(`Client connected: ${socket.id}`);
+
+  let sessionId = null;
+  let currentWorkingDir = HOME;
+
+  socket.on("start-session", (data) => {
+    currentWorkingDir = expandPath(data?.workingDir || HOME);
+    sessionId = createSession(currentWorkingDir);
+    socket.emit("session-started", {
+      sessionId,
+      workingDir: currentWorkingDir,
+    });
+    console.log(`Session started: ${sessionId} in ${currentWorkingDir}`);
+  });
+
+  // Restore an existing session by ID
+  socket.on("restore-session", (data) => {
+    // Validate session ID format to prevent manipulation
+    if (!isValidUUID(data?.sessionId)) {
+      socket.emit("session-restore-failed", { message: "Invalid session ID" });
+      return;
+    }
+    const existingSession = restoreSession(data.sessionId);
+    if (existingSession) {
+      sessionId = existingSession.id;
+      currentWorkingDir = existingSession.workingDir;
+      socket.emit("session-restored", {
+        sessionId,
+        workingDir: currentWorkingDir,
+        messageCount: existingSession.history.length,
+        hasClaudeSession: !!existingSession.claudeSessionId,
+      });
+      console.log(
+        `Session restored: ${sessionId} (${existingSession.history.length} messages)`,
+      );
+    } else {
+      socket.emit("session-restore-failed", { message: "Session not found" });
+    }
+  });
+
+  // List available sessions
+  socket.on("list-sessions", async () => {
+    const sessions = await listSessions();
+    socket.emit("sessions-list", { sessions });
+  });
+
+  // Handle push subscription (stored per session, persists through disconnects)
+  socket.on("push-subscribe", (data) => {
+    if (data?.subscription && sessionId) {
+      pushSubscriptions.set(sessionId, data.subscription);
+      console.log(`[${sessionId}] Push subscription registered`);
+    }
+  });
+
+  // Handle push unsubscription
+  socket.on("push-unsubscribe", () => {
+    if (sessionId) {
+      pushSubscriptions.delete(sessionId);
+      console.log(`[${sessionId}] Push subscription removed`);
+    }
+  });
+
+  // Handle visibility change (stored per session, persists through disconnects)
+  socket.on("visibility-change", (data) => {
+    if (sessionId) {
+      clientVisibility.set(sessionId, data?.visible ?? true);
+      console.log(
+        `[${sessionId}] Visibility: ${data?.visible ? "visible" : "hidden"}`,
+      );
+    }
+  });
+
+  // Get buffered response (for reconnection after disconnect)
+  socket.on("get-buffered-response", () => {
+    if (!sessionId) {
+      socket.emit("buffered-response", { chunks: [], isComplete: false });
+      return;
+    }
+
+    const buffer = getBufferedResponse(sessionId);
+    if (buffer && buffer.chunks.length > 0) {
+      socket.emit("buffered-response", buffer);
+      // Clear buffer after sending
+      if (buffer.isComplete) {
+        clearBuffer(sessionId);
+      }
+      console.log(
+        `[${sessionId}] Sent ${buffer.chunks.length} buffered chunks (complete: ${buffer.isComplete})`,
+      );
+    } else {
+      socket.emit("buffered-response", { chunks: [], isComplete: false });
+    }
+  });
+
+  // Handle image uploads
+  const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB per image
+  const MAX_IMAGES_PER_REQUEST = 5;
+
+  socket.on("upload-images", async (data) => {
+    try {
+      const { images } = data; // Array of { name, data (base64), type }
+      if (!images || !Array.isArray(images) || images.length === 0) {
+        socket.emit("upload-error", { message: "No images provided" });
+        return;
+      }
+
+      if (images.length > MAX_IMAGES_PER_REQUEST) {
+        socket.emit("upload-error", {
+          message: `Maximum ${MAX_IMAGES_PER_REQUEST} images per message`,
+        });
+        return;
+      }
+
+      const uploadedPaths = [];
+      const timestamp = Date.now();
+
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        // Validate image type (allow image/* including svg+xml)
+        if (!img.type || !img.type.startsWith("image/")) {
+          continue;
+        }
+
+        // Check size (base64 is ~33% larger than binary)
+        const estimatedSize = (img.data.length * 3) / 4;
+        if (estimatedSize > MAX_IMAGE_SIZE) {
+          socket.emit("upload-error", {
+            message: `Image too large (max ${MAX_IMAGE_SIZE / 1024 / 1024}MB)`,
+          });
+          return;
+        }
+
+        // Generate safe filename - extract extension from MIME type
+        const ext = img.type.split("/")[1]?.split("+")[0] || "png";
+        const safeExt = ext.replace(/[^a-z0-9]/gi, "").substring(0, 10);
+        const filename = `${timestamp}_${i}.${safeExt}`;
+        const filepath = join(UPLOADS_DIR, filename);
+
+        // Decode base64 and save (handle both data URL and raw base64)
+        const base64Data = img.data.replace(/^data:image\/[^;]+;base64,/, "");
+        await writeFile(filepath, Buffer.from(base64Data, "base64"));
+        uploadedPaths.push(filepath);
+      }
+
+      socket.emit("upload-complete", { paths: uploadedPaths });
+      console.log(`[${sessionId}] Uploaded ${uploadedPaths.length} images`);
+    } catch (err) {
+      socket.emit("upload-error", { message: err.message });
+      console.error(`Upload error: ${err.message}`);
+    }
+  });
+
+  socket.on("message", (data) => {
+    if (!sessionId) {
+      socket.emit("error", { message: "No active session" });
+      return;
+    }
+
+    // Rate limiting check
+    const rateCheck = rateLimiter.isAllowed(socket.id);
+    if (!rateCheck.allowed) {
+      socket.emit("rate-limited", {
+        message: `Rate limit exceeded. Try again in ${rateCheck.resetIn} seconds.`,
+        resetIn: rateCheck.resetIn,
+      });
+      console.log(
+        `[${sessionId}] Rate limited (reset in ${rateCheck.resetIn}s)`,
+      );
+      return;
+    }
+
+    const prompt = data.prompt;
+    const imagePaths = data.imagePaths || []; // Array of uploaded image paths
+
+    if (!prompt && imagePaths.length === 0) {
+      socket.emit("error", { message: "No prompt or images provided" });
+      return;
+    }
+
+    const imageInfo =
+      imagePaths.length > 0 ? ` +${imagePaths.length} images` : "";
+    console.log(
+      `[${sessionId}] Prompt: ${(prompt || "").substring(0, 50)}...${imageInfo} (${rateCheck.remaining} remaining)`,
+    );
+
+    socket.emit("response-start");
+
+    // Cancel any existing retry operation for this session
+    if (activeRetries.has(sessionId)) {
+      activeRetries.get(sessionId).abort();
+      activeRetries.delete(sessionId);
+    }
+
+    // Create abort controller for this retry operation
+    const abortController = new AbortController();
+    activeRetries.set(sessionId, abortController);
+
+    // Retry wrapper for runClaudeCommand
+    let attempt = 0;
+    let lastError = null;
+    let hasReceivedData = false;
+
+    const attemptCommand = () => {
+      hasReceivedData = false; // Reset for each attempt
+      return new Promise((resolve) => {
+        runClaudeCommand(
+          sessionId,
+          prompt || "What do you see in this image?",
+          imagePaths,
+          (chunk) => {
+            hasReceivedData = true;
+            socket.emit("response-chunk", chunk);
+          },
+          async (code) => {
+            // If we received data, don't retry (even on non-zero exit)
+            // This prevents losing partial responses
+            if (hasReceivedData || code === 0) {
+              resolve({ success: true, code });
+            } else {
+              // No data received and non-zero exit - this is retryable
+              resolve({
+                success: false,
+                error: new Error(`Exit code: ${code}`),
+              });
+            }
+          },
+          (err) => {
+            // Process spawn error - retryable
+            resolve({ success: false, error: err });
+          },
+        );
+      });
+    };
+
+    // Interruptible sleep that respects abort signal
+    const interruptibleSleep = (ms) => {
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(resolve, ms);
+        abortController.signal.addEventListener("abort", () => {
+          clearTimeout(timeout);
+          reject(new Error("Aborted"));
+        });
+      });
+    };
+
+    const runWithRetry = async () => {
+      try {
+        while (attempt < RETRY_MAX_ATTEMPTS) {
+          // Check if aborted before each attempt
+          if (abortController.signal.aborted) {
+            console.log(`[${sessionId}] Retry aborted`);
+            return;
+          }
+
+          attempt++;
+
+          if (attempt > 1) {
+            const delay = getRetryDelay(attempt - 2);
+            console.log(
+              `[${sessionId}] Retry attempt ${attempt}/${RETRY_MAX_ATTEMPTS} in ${Math.round(delay)}ms`,
+            );
+            socket.emit("retry-status", {
+              attempt,
+              maxAttempts: RETRY_MAX_ATTEMPTS,
+              delayMs: Math.round(delay),
+            });
+
+            try {
+              await interruptibleSleep(delay);
+            } catch (e) {
+              // Sleep was interrupted (user stopped or new message)
+              console.log(`[${sessionId}] Retry sleep interrupted`);
+              return;
+            }
+          }
+
+          const result = await attemptCommand();
+
+          if (result.success) {
+            // Success - send response-end and push notification
+            socket.emit("response-end", { exitCode: result.code });
+            console.log(
+              `[${sessionId}] Response complete (exit: ${result.code})`,
+            );
+
+            // Send push notification if client is backgrounded
+            const isVisible = clientVisibility.get(sessionId);
+            const subscription = pushSubscriptions.get(sessionId);
+
+            const isValidSubscription =
+              subscription?.endpoint &&
+              typeof subscription.endpoint === "string" &&
+              subscription.keys?.p256dh &&
+              subscription.keys?.auth;
+
+            if (
+              !isVisible &&
+              isValidSubscription &&
+              process.env.VAPID_PUBLIC_KEY
+            ) {
+              try {
+                await webpush.sendNotification(
+                  subscription,
+                  JSON.stringify({
+                    title: "Claude Web",
+                    body: "Response complete",
+                    sessionId: sessionId,
+                    url: "/",
+                  }),
+                );
+                console.log(`[${sessionId}] Push notification sent`);
+              } catch (err) {
+                console.error(
+                  `[${sessionId}] Push notification failed:`,
+                  err.message,
+                );
+                if (err.statusCode >= 400 && err.statusCode < 500) {
+                  pushSubscriptions.delete(sessionId);
+                }
+              }
+            }
+            return;
+          }
+
+          lastError = result.error;
+          console.error(
+            `[${sessionId}] Attempt ${attempt} failed: ${lastError.message}`,
+          );
+        }
+
+        // All retries exhausted
+        console.error(
+          `[${sessionId}] All ${RETRY_MAX_ATTEMPTS} attempts failed`,
+        );
+        socket.emit("error", {
+          message: `Request failed after ${RETRY_MAX_ATTEMPTS} attempts: ${lastError?.message || "Unknown error"}`,
+          retryExhausted: true,
+        });
+      } finally {
+        // Clean up abort controller
+        activeRetries.delete(sessionId);
+      }
+    };
+
+    runWithRetry();
+  });
+
+  socket.on("list-files", async (data) => {
+    try {
+      const requestedPath = expandPath(data?.path || HOME);
+      const resolvedPath = resolve(requestedPath);
+
+      // Security: ensure path is within allowed directories
+      if (!resolvedPath.startsWith(HOME) && !resolvedPath.startsWith("/tmp")) {
+        socket.emit("file-list", {
+          files: [],
+          path: resolvedPath,
+          error: "Access denied",
+        });
+        return;
+      }
+
+      const entries = await readdir(resolvedPath, { withFileTypes: true });
+      const files = await Promise.all(
+        entries
+          .filter((entry) => !entry.name.startsWith(".")) // Hide hidden files
+          .slice(0, 50) // Limit to 50 entries
+          .map(async (entry) => {
+            const fullPath = join(resolvedPath, entry.name);
+            return {
+              name: entry.name,
+              path: fullPath,
+              isDirectory: entry.isDirectory(),
+            };
+          }),
+      );
+
+      // Sort: directories first, then alphabetically
+      files.sort((a, b) => {
+        if (a.isDirectory && !b.isDirectory) return -1;
+        if (!a.isDirectory && b.isDirectory) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      socket.emit("file-list", { files, path: resolvedPath });
+    } catch (err) {
+      socket.emit("file-list", {
+        files: [],
+        path: data?.path || HOME,
+        error: err.message,
+      });
+    }
+  });
+
+  socket.on("stop", () => {
+    if (sessionId) {
+      // Abort any active retry operation
+      if (activeRetries.has(sessionId)) {
+        activeRetries.get(sessionId).abort();
+        activeRetries.delete(sessionId);
+      }
+      stopSession(sessionId);
+      socket.emit("stopped");
+    }
+  });
+
+  // Conversation history handlers
+  socket.on("save-conversation", async (data) => {
+    try {
+      const { id, title, messages, tokens, workingDir } = data;
+      // Generate safe ID if not provided, validate if provided
+      const safeId = id ? (isValidId(id) ? id : null) : Date.now().toString();
+      if (!safeId) {
+        socket.emit("error", { message: "Invalid conversation ID" });
+        return;
+      }
+      const conversation = {
+        id: safeId,
+        title: title || generateTitle(messages),
+        messages,
+        tokens,
+        workingDir,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      const filePath = join(HISTORY_DIR, `${conversation.id}.json`);
+      await writeFile(filePath, JSON.stringify(conversation, null, 2));
+      socket.emit("conversation-saved", {
+        id: conversation.id,
+        title: conversation.title,
+      });
+    } catch (err) {
+      socket.emit("error", { message: `Failed to save: ${err.message}` });
+    }
+  });
+
+  socket.on("list-conversations", async () => {
+    try {
+      const files = await readdir(HISTORY_DIR);
+      const conversations = [];
+
+      for (const file of files) {
+        if (!file.endsWith(".json")) continue;
+        try {
+          const content = await readFile(join(HISTORY_DIR, file), "utf-8");
+          const conv = JSON.parse(content);
+          conversations.push({
+            id: conv.id,
+            title: conv.title,
+            messageCount: conv.messages?.length || 0,
+            createdAt: conv.createdAt,
+            updatedAt: conv.updatedAt,
+          });
+        } catch (e) {
+          // Skip invalid files
+        }
+      }
+
+      // Sort by most recent first
+      conversations.sort(
+        (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
+      );
+      socket.emit("conversations-list", { conversations });
+    } catch (err) {
+      socket.emit("conversations-list", { conversations: [] });
+    }
+  });
+
+  socket.on("load-conversation", async (data) => {
+    try {
+      // Validate ID to prevent path traversal
+      if (!isValidId(data?.id)) {
+        socket.emit("error", { message: "Invalid conversation ID" });
+        return;
+      }
+      const filePath = join(HISTORY_DIR, `${data.id}.json`);
+      const content = await readFile(filePath, "utf-8");
+      const conversation = JSON.parse(content);
+      socket.emit("conversation-loaded", conversation);
+    } catch (err) {
+      socket.emit("error", { message: `Failed to load: ${err.message}` });
+    }
+  });
+
+  socket.on("delete-conversation", async (data) => {
+    try {
+      // Validate ID to prevent path traversal
+      if (!isValidId(data?.id)) {
+        socket.emit("error", { message: "Invalid conversation ID" });
+        return;
+      }
+      const filePath = join(HISTORY_DIR, `${data.id}.json`);
+      await unlink(filePath);
+      socket.emit("conversation-deleted", { id: data.id });
+    } catch (err) {
+      socket.emit("error", { message: `Failed to delete: ${err.message}` });
+    }
+  });
+
+  socket.on("disconnect", () => {
+    console.log(`Client disconnected: ${socket.id}`);
+    // Clean up rate limiter for this socket
+    rateLimiter.cleanup(socket.id);
+    // Note: We intentionally DO NOT delete push subscription or visibility on disconnect
+    // These are stored per session and should persist so push notifications work
+    // even after the phone disconnects (e.g., screen off kills the socket)
+    // Note: We no longer stop the session on disconnect to enable persistence
+    // The session remains available for reconnection
+    if (sessionId) {
+      console.log(`Session ${sessionId} preserved for reconnection`);
+    }
+  });
+});
+
+// Load persisted sessions and start server
+(async () => {
+  await loadPersistedSessions();
+
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Claude Web running on http://0.0.0.0:${PORT}`);
+    console.log(
+      `Auth token required: ${process.env.AUTH_TOKEN?.substring(0, 8)}...`,
+    );
+    console.log(
+      `Rate limit: ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`,
+    );
+  });
+})();

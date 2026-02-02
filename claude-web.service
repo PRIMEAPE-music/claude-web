@@ -1,0 +1,26 @@
+[Unit]
+Description=Claude Web - Mobile-friendly Claude Code interface
+After=network.target
+
+[Service]
+Type=simple
+User=primeape
+Group=primeape
+WorkingDirectory=/home/primeape/claude-web
+Environment=NODE_ENV=production
+Environment=PORT=3001
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=claude-web
+
+[Install]
+WantedBy=multi-user.target

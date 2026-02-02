@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="theme-color" content="#1a1a2e" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <title>Claude Web</title>
+    <link rel="stylesheet" href="style.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
+    />
+    <link rel="manifest" href="manifest.json" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Auth Screen -->
+      <div id="auth-screen" class="screen">
+        <div class="auth-box">
+          <h1>Claude Web</h1>
+          <p class="subtitle">Access Claude Code from anywhere</p>
+          <input
+            type="password"
+            id="token-input"
+            placeholder="Enter auth token"
+            autocomplete="off"
+          />
+          <button id="auth-btn">Connect</button>
+          <p id="auth-error" class="error"></p>
+        </div>
+      </div>
+
+      <!-- Chat Screen -->
+      <div id="chat-screen" class="screen hidden">
+        <!-- Header -->
+        <header>
+          <button id="menu-btn" class="icon-btn" title="Menu">☰</button>
+          <div class="header-center">
+            <h1>Claude</h1>
+            <span id="working-dir" title="Working directory">~</span>
+          </div>
+          <div class="header-right">
+            <button
+              id="search-btn"
+              class="icon-btn"
+              title="Search messages (Ctrl+F)"
+            >
+              🔍
+            </button>
+            <span id="status" title="Connection status">●</span>
+            <button id="settings-btn" class="icon-btn" title="Settings">
+              ⚙
+            </button>
+          </div>
+        </header>
+
+        <!-- Search Bar -->
+        <div id="search-bar" class="hidden">
+          <div class="search-input-wrapper">
+            <input
+              type="text"
+              id="search-input"
+              placeholder="Search messages..."
+              autocomplete="off"
+            />
+            <span id="search-count" class="search-count"></span>
+          </div>
+          <div class="search-nav">
+            <button
+              id="search-prev"
+              class="search-nav-btn"
+              title="Previous (Shift+Enter)"
+            >
+              ▲
+            </button>
+            <button
+              id="search-next"
+              class="search-nav-btn"
+              title="Next (Enter)"
+            >
+              ▼
+            </button>
+            <button
+              id="search-close"
+              class="search-nav-btn"
+              title="Close (Escape)"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div id="sidebar" class="hidden">
+          <div class="sidebar-header">
+            <h2>Menu</h2>
+            <button id="close-sidebar" class="icon-btn">✕</button>
+          </div>
+
+          <div class="sidebar-section">
+            <h3>Session</h3>
+            <button id="new-session-btn" class="sidebar-btn">
+              New Session
+            </button>
+            <button id="clear-chat-btn" class="sidebar-btn">Clear Chat</button>
+            <button id="export-btn" class="sidebar-btn">Export Chat</button>
+          </div>
+
+          <div class="sidebar-section">
+            <h3>History</h3>
+            <div id="history-list" class="history-list">
+              <div class="history-empty">Loading...</div>
+            </div>
+          </div>
+
+          <div class="sidebar-section">
+            <h3>Working Directory</h3>
+            <div id="dir-input-wrap">
+              <input
+                type="text"
+                id="dir-input"
+                placeholder="/home/user/project"
+              />
+              <button id="dir-set-btn">Set</button>
+            </div>
+            <div id="dir-favorites"></div>
+          </div>
+
+          <div class="sidebar-section">
+            <div class="section-header">
+              <h3>Quick Actions</h3>
+              <button
+                id="manage-actions-btn"
+                class="manage-btn"
+                title="Manage Actions"
+                aria-label="Manage Quick Actions"
+              >
+                ⚙
+              </button>
+            </div>
+            <div id="quick-actions">
+              <!-- Quick actions are rendered dynamically by JavaScript -->
+            </div>
+          </div>
+
+          <div class="sidebar-section">
+            <h3>File Browser</h3>
+            <div id="file-browser">
+              <div id="file-path-bar">
+                <button id="file-up-btn" class="icon-btn">⬆</button>
+                <span id="file-current-path">~</span>
+              </div>
+              <div id="file-list"></div>
+            </div>
+          </div>
+        </div>
+        <div id="sidebar-overlay" class="hidden"></div>
+
+        <!-- Quick Actions Modal -->
+        <div id="actions-modal" class="modal hidden">
+          <div class="modal-content actions-modal-content">
+            <div class="modal-header">
+              <h2>Manage Quick Actions</h2>
+              <button id="close-actions-modal" class="icon-btn">✕</button>
+            </div>
+            <div class="actions-list" id="actions-list">
+              <!-- Actions will be rendered here -->
+            </div>
+            <div class="actions-modal-footer">
+              <button id="add-action-btn" class="add-action-btn">
+                + Add Action
+              </button>
+              <button id="reset-actions-btn" class="reset-btn">
+                Reset to Default
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Settings Modal -->
+        <div id="settings-modal" class="modal hidden">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h2>Settings</h2>
+              <button id="close-settings" class="icon-btn">✕</button>
+            </div>
+
+            <div class="setting-group">
+              <label>Theme</label>
+              <div class="toggle-group">
+                <button id="theme-dark" class="toggle-btn active">Dark</button>
+                <button id="theme-light" class="toggle-btn">Light</button>
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <label>Font Size</label>
+              <div class="font-size-controls">
+                <button id="font-decrease" class="icon-btn">A-</button>
+                <span id="font-size-display">16px</span>
+                <button id="font-increase" class="icon-btn">A+</button>
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <label>
+                <input type="checkbox" id="sound-enabled" checked />
+                Sound on response complete
+              </label>
+            </div>
+
+            <div class="setting-group">
+              <label>
+                <input type="checkbox" id="auto-scroll" checked />
+                Auto-scroll to bottom
+              </label>
+            </div>
+
+            <div class="setting-group">
+              <label>
+                <input type="checkbox" id="show-tools" checked />
+                Show tool usage
+              </label>
+            </div>
+
+            <div class="setting-group">
+              <label>
+                <input type="checkbox" id="vibrate-enabled" checked />
+                Haptic feedback
+              </label>
+            </div>
+
+            <div class="setting-group">
+              <label>
+                <input type="checkbox" id="push-enabled" checked />
+                Push notifications (when screen off)
+              </label>
+            </div>
+
+            <div class="setting-group">
+              <button id="logout-btn" class="danger-btn">Logout</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Messages Area -->
+        <div id="messages">
+          <div id="welcome-message" class="welcome">
+            <h2>Welcome to Claude Web</h2>
+            <p>Send a message or use Quick Actions from the menu.</p>
+            <div class="welcome-tips">
+              <p><strong>Tips:</strong></p>
+              <ul>
+                <li>Tap ☰ for quick actions and file browser</li>
+                <li>Tap the mic button for voice input</li>
+                <li>Long-press code blocks to copy</li>
+                <li>Swipe right to open menu</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- Quick Actions Bar (collapsible) -->
+        <div id="quick-actions-bar" class="collapsed">
+          <button
+            id="toggle-actions-bar"
+            class="toggle-bar-btn"
+            title="Toggle quick actions"
+          >
+            <span class="toggle-icon">⚡</span>
+            <span class="toggle-label">Quick Actions</span>
+            <span class="toggle-arrow">▲</span>
+          </button>
+          <div id="actions-bar-content">
+            <!-- Quick action buttons rendered here by JS -->
+          </div>
+        </div>
+
+        <!-- Input Area -->
+        <div id="input-area">
+          <button id="voice-btn" class="icon-btn" title="Voice input">
+            🎤
+          </button>
+          <button id="upload-btn" class="icon-btn" title="Upload image">
+            📷
+          </button>
+          <input
+            type="file"
+            id="file-upload"
+            accept="image/*"
+            multiple
+            hidden
+          />
+          <div id="input-wrapper">
+            <div id="image-preview-area" class="hidden"></div>
+            <textarea
+              id="prompt"
+              placeholder="Ask Claude..."
+              rows="1"
+            ></textarea>
+          </div>
+          <button id="send-btn" disabled title="Send message">➤</button>
+          <button id="stop-btn" class="hidden" title="Stop">■</button>
+        </div>
+
+        <!-- Image Lightbox -->
+        <div id="image-lightbox" class="hidden">
+          <div class="lightbox-overlay"></div>
+          <div class="lightbox-content">
+            <img id="lightbox-image" src="" alt="Full size image" />
+            <button id="lightbox-close" class="icon-btn">✕</button>
+            <button id="lightbox-download" class="icon-btn" title="Download">
+              ⬇
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Audio for notification (Mario coin sound) -->
+    <audio id="notification-sound" preload="auto">
+      <source src="notification.mp3" type="audio/mpeg" />
+    </audio>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="client.js"></script>
+  </body>
+</html>
