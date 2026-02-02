@@ -603,12 +603,6 @@ function connect(token) {
       if (settings.autoScroll) scrollToBottom();
     } else if (chunk.type === "tool_start") {
       // Update progress indicator with tool info
-      console.log(
-        "[Tool] tool_start received:",
-        chunk.name,
-        "showTools:",
-        settings.showTools,
-      );
       updateProgressStatus(`Using ${chunk.name}...`);
       if (settings.showTools) {
         const inputStr =
@@ -617,8 +611,6 @@ function connect(token) {
             : JSON.stringify(chunk.input, null, 2);
         addToolToContainer(chunk.name, inputStr || "(executing...)", chunk.id);
         if (settings.autoScroll) scrollToBottom();
-      } else {
-        console.log("[Tool] showTools is false, skipping container");
       }
     } else if (chunk.type === "tool_result") {
       // Tool finished - update progress and tool message
@@ -997,23 +989,12 @@ function addMessage(content, type, images = []) {
 function getOrCreateToolContainer() {
   // Check if existing container is still in the DOM (not stale)
   if (currentToolContainer && currentToolContainer.parentNode === messages) {
-    console.log("[Tool] Reusing existing container");
     return currentToolContainer;
   }
   // Reset if stale reference
-  if (currentToolContainer) {
-    console.log(
-      "[Tool] Container stale, parentNode:",
-      currentToolContainer.parentNode,
-    );
-  }
   currentToolContainer = null;
   toolCount = 0;
 
-  console.log(
-    "[Tool] Creating new container, currentResponse:",
-    !!currentResponse,
-  );
   const container = document.createElement("div");
   container.className = "tool-container collapsed";
 
@@ -1043,7 +1024,6 @@ function getOrCreateToolContainer() {
   // Insert tool container BEFORE currentResponse so tools appear above the text
   // This matches the logical order: tools execute first, then Claude generates text
   if (currentResponse && currentResponse.parentNode === messages) {
-    console.log("[Tool] Inserting container before currentResponse");
     messages.insertBefore(container, currentResponse);
   } else {
     messages.appendChild(container);
