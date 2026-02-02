@@ -55,6 +55,14 @@
             >
               🔍
             </button>
+            <button id="memory-btn" class="icon-btn" title="Memory">🧠</button>
+            <button
+              id="browser-preview-btn"
+              class="icon-btn"
+              title="Browser Preview"
+            >
+              🌐
+            </button>
             <span id="status" title="Connection status">●</span>
             <button id="settings-btn" class="icon-btn" title="Settings">
               ⚙
@@ -112,6 +120,16 @@
             </button>
             <button id="clear-chat-btn" class="sidebar-btn">Clear Chat</button>
             <button id="export-btn" class="sidebar-btn">Export Chat</button>
+          </div>
+
+          <div class="sidebar-section">
+            <h3>Model</h3>
+            <select id="model-select" class="model-select">
+              <option value="opus">Opus 4.5 (Most capable)</option>
+              <option value="sonnet">Sonnet 4.5 (Balanced)</option>
+              <option value="haiku">Haiku 4.5 (Fast)</option>
+            </select>
+            <span class="setting-hint">Applies to new sessions</span>
           </div>
 
           <div class="sidebar-section">
@@ -247,6 +265,256 @@
 
             <div class="setting-group">
               <button id="logout-btn" class="danger-btn">Logout</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Memory Modal -->
+        <div id="memory-modal" class="modal hidden">
+          <div class="modal-content memory-modal-content">
+            <div class="modal-header">
+              <h2>🧠 Memory</h2>
+              <button id="close-memory-modal" class="icon-btn">✕</button>
+            </div>
+
+            <div class="memory-search-bar">
+              <input
+                type="text"
+                id="memory-search-input"
+                placeholder="Search entities..."
+                autocomplete="off"
+              />
+              <button id="memory-refresh-btn" class="icon-btn" title="Refresh">
+                🔄
+              </button>
+            </div>
+
+            <div class="memory-tabs">
+              <button class="memory-tab active" data-tab="entities">
+                Entities
+              </button>
+              <button class="memory-tab" data-tab="relations">Relations</button>
+            </div>
+
+            <div class="memory-content">
+              <div id="memory-entities-tab" class="memory-tab-content active">
+                <div id="memory-entities-list" class="memory-list">
+                  <div class="memory-loading">Loading...</div>
+                </div>
+              </div>
+              <div id="memory-relations-tab" class="memory-tab-content">
+                <div id="memory-relations-list" class="memory-list">
+                  <div class="memory-loading">Loading...</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="memory-footer">
+              <span id="memory-stats" class="memory-stats"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Entity Detail Modal -->
+        <div id="entity-detail-modal" class="modal hidden">
+          <div class="modal-content entity-detail-modal-content">
+            <div class="modal-header">
+              <button id="entity-detail-back" class="icon-btn" title="Back">
+                ←
+              </button>
+              <h2 id="entity-detail-title">Entity</h2>
+              <button id="close-entity-detail" class="icon-btn">✕</button>
+            </div>
+
+            <div class="entity-detail-content">
+              <div class="entity-detail-meta">
+                <span id="entity-detail-type" class="entity-type-badge"></span>
+              </div>
+
+              <div class="entity-detail-section">
+                <h3>Observations</h3>
+                <div
+                  id="entity-detail-observations"
+                  class="entity-observations-list"
+                >
+                  <div class="memory-empty">No observations</div>
+                </div>
+              </div>
+
+              <div class="entity-detail-section">
+                <h3>Relations</h3>
+                <div id="entity-detail-relations" class="entity-relations-list">
+                  <div class="memory-empty">No relations</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Browser Preview Modal -->
+        <div id="browser-preview-modal" class="modal hidden">
+          <div class="modal-content browser-preview-modal-content">
+            <!-- Header -->
+            <div class="modal-header">
+              <h2>Browser Preview</h2>
+              <div class="modal-header-actions">
+                <button
+                  id="browser-preview-popout"
+                  class="icon-btn"
+                  title="Open in new window"
+                >
+                  ↗
+                </button>
+                <button id="close-browser-preview" class="icon-btn">✕</button>
+              </div>
+            </div>
+
+            <!-- Mode Tabs -->
+            <div class="browser-preview-tabs">
+              <button class="browser-preview-tab active" data-tab="iframe">
+                Iframe
+              </button>
+              <button class="browser-preview-tab" data-tab="puppeteer">
+                Puppeteer
+              </button>
+              <button class="browser-preview-tab" data-tab="html">HTML</button>
+            </div>
+
+            <!-- URL Bar -->
+            <div class="browser-preview-url-bar">
+              <input
+                type="text"
+                id="browser-preview-url"
+                placeholder="http://localhost:5173"
+              />
+              <button id="browser-preview-go" class="url-btn">Go</button>
+              <button id="browser-preview-refresh" class="url-btn icon-btn">
+                ↻
+              </button>
+            </div>
+
+            <!-- Preview Container with 3 tab contents -->
+            <div class="browser-preview-container">
+              <!-- Iframe tab -->
+              <div
+                id="browser-preview-iframe-tab"
+                class="browser-preview-tab-content active"
+              >
+                <iframe
+                  id="browser-preview-iframe"
+                  sandbox="allow-scripts allow-forms"
+                  src="about:blank"
+                ></iframe>
+              </div>
+
+              <!-- Puppeteer tab -->
+              <div
+                id="browser-preview-puppeteer-tab"
+                class="browser-preview-tab-content"
+              >
+                <div class="puppeteer-screenshot-container">
+                  <img
+                    id="puppeteer-screenshot"
+                    src=""
+                    alt="Browser screenshot"
+                    class="hidden"
+                  />
+                  <div id="puppeteer-loading" class="puppeteer-loading hidden">
+                    <span class="spinner"></span>
+                    <span>Loading...</span>
+                  </div>
+                  <div id="puppeteer-placeholder" class="puppeteer-placeholder">
+                    Enter a URL and click Go to capture a screenshot
+                  </div>
+                </div>
+              </div>
+
+              <!-- HTML tab -->
+              <div
+                id="browser-preview-html-tab"
+                class="browser-preview-tab-content"
+              >
+                <div class="html-preview-controls">
+                  <textarea
+                    id="html-preview-input"
+                    placeholder="Paste HTML code here..."
+                  ></textarea>
+                  <button id="html-preview-render" class="url-btn">
+                    Render
+                  </button>
+                </div>
+                <iframe
+                  id="html-preview-iframe"
+                  sandbox="allow-scripts allow-forms"
+                  src="about:blank"
+                ></iframe>
+              </div>
+            </div>
+
+            <!-- Toolbar -->
+            <div class="browser-preview-toolbar">
+              <div class="viewport-buttons">
+                <button
+                  class="viewport-btn"
+                  data-viewport="mobile"
+                  title="Mobile (375px)"
+                >
+                  📱
+                </button>
+                <button
+                  class="viewport-btn"
+                  data-viewport="tablet"
+                  title="Tablet (768px)"
+                >
+                  📱
+                </button>
+                <button
+                  class="viewport-btn active"
+                  data-viewport="desktop"
+                  title="Desktop (100%)"
+                >
+                  🖥️
+                </button>
+              </div>
+              <div class="puppeteer-controls hidden">
+                <button
+                  id="puppeteer-click-mode"
+                  class="toolbar-btn"
+                  title="Click mode - click on screenshot to interact"
+                >
+                  👆 Click Mode
+                </button>
+                <button
+                  id="puppeteer-devtools"
+                  class="toolbar-btn"
+                  title="Open DevTools"
+                >
+                  🔧 DevTools
+                </button>
+              </div>
+              <div class="browser-preview-status">
+                <span id="browser-preview-status-text"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- DevTools Modal (for Puppeteer JS execution) -->
+        <div id="devtools-modal" class="modal hidden">
+          <div class="modal-content devtools-modal-content">
+            <div class="modal-header">
+              <h2>DevTools Console</h2>
+              <button id="close-devtools" class="icon-btn">✕</button>
+            </div>
+            <div class="devtools-content">
+              <div id="devtools-output" class="devtools-output"></div>
+              <div class="devtools-input-area">
+                <textarea
+                  id="devtools-input"
+                  placeholder="Enter JavaScript to execute..."
+                ></textarea>
+                <button id="devtools-run" class="url-btn">Run</button>
+              </div>
             </div>
           </div>
         </div>

@@ -69,6 +69,7 @@ const settings = {
   showTools: localStorage.getItem("showTools") !== "false",
   vibrateEnabled: localStorage.getItem("vibrateEnabled") !== "false",
   pushEnabled: localStorage.getItem("pushEnabled") !== "false",
+  model: localStorage.getItem("claude-model") || "opus",
 };
 
 // Push notification state
@@ -282,10 +283,16 @@ function connect(token) {
       console.log("Attempting to restore session:", currentSessionId);
       socket.emit("restore-session", { sessionId: currentSessionId });
     } else {
-      socket.emit("start-session", { workingDir: expandPath(workingDir) });
+      socket.emit("start-session", {
+        workingDir: expandPath(workingDir),
+        model: settings.model,
+      });
     }
     updateWorkingDirDisplay();
     loadFileList(workingDir);
+
+    // Setup memory socket listeners immediately on connect
+    setupMemorySocketListeners();
 
     // Note: Push subscription and visibility are sent AFTER session is established
     // (in session-started and session-restored handlers) to ensure sessionId is set
@@ -457,7 +464,10 @@ function connect(token) {
     // Clear stale session ID and start fresh
     currentSessionId = null;
     localStorage.removeItem("claude-web-sessionId");
-    socket.emit("start-session", { workingDir: expandPath(workingDir) });
+    socket.emit("start-session", {
+      workingDir: expandPath(workingDir),
+      model: settings.model,
+    });
   });
 
   socket.on("rate-limited", (data) => {
@@ -1426,6 +1436,15 @@ document.getElementById("push-enabled").onchange = async (e) => {
   }
 };
 
+// Model selection
+document.getElementById("model-select").onchange = (e) => {
+  settings.model = e.target.value;
+  localStorage.setItem("claude-model", settings.model);
+  showToast(
+    `Model set to ${e.target.options[e.target.selectedIndex].text}. Takes effect on next session.`,
+  );
+};
+
 // Logout
 document.getElementById("logout-btn").onclick = () => {
   localStorage.removeItem("claude-web-token");
@@ -1452,6 +1471,10 @@ function applySettings() {
   if (vibrateEnabled) vibrateEnabled.checked = settings.vibrateEnabled;
   if (pushEnabled) pushEnabled.checked = settings.pushEnabled;
 
+  // Set model select value
+  const modelSelect = document.getElementById("model-select");
+  if (modelSelect) modelSelect.value = settings.model;
+
   document.getElementById("font-size-display").textContent =
     settings.fontSize + "px";
 }
@@ -1462,7 +1485,10 @@ document.getElementById("new-session-btn").onclick = () => {
     // Clear stored session ID to force a fresh start
     currentSessionId = null;
     localStorage.removeItem("claude-web-sessionId");
-    socket.emit("start-session", { workingDir: expandPath(workingDir) });
+    socket.emit("start-session", {
+      workingDir: expandPath(workingDir),
+      model: settings.model,
+    });
     messages.innerHTML = "";
     conversationMessages = [];
     currentConversationId = null;
@@ -1516,7 +1542,10 @@ dirSetBtn.onclick = () => {
     updateWorkingDirDisplay();
 
     if (socket) {
-      socket.emit("start-session", { workingDir: expandPath(workingDir) });
+      socket.emit("start-session", {
+        workingDir: expandPath(workingDir),
+        model: settings.model,
+      });
       showToast(`Working directory: ${workingDir}`);
     }
 
@@ -2479,5 +2508,1079 @@ document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "f") {
     e.preventDefault();
     openSearch();
+  }
+});
+
+// ============================================
+// Mobile Keyboard Handling
+// ============================================
+
+// Detect if running on mobile
+const isMobile =
+  /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+    navigator.userAgent,
+  );
+
+if (isMobile && window.visualViewport) {
+  const inputArea = document.getElementById("input-area");
+  const quickActionsBar = document.getElementById("quick-actions-bar");
+
+  // Position input at bottom of visual viewport (above keyboard)
+  const repositionInput = () => {
+    const vv = window.visualViewport;
+    // Calculate where bottom of visual viewport is relative to layout viewport
+    const offsetTop = vv.offsetTop;
+    const bottomOfViewport = offsetTop + vv.height;
+
+    // Position input area at bottom of visual viewport
+    if (inputArea) {
+      inputArea.style.position = "fixed";
+      inputArea.style.bottom = "auto";
+      inputArea.style.top = `${bottomOfViewport - inputArea.offsetHeight}px`;
+      inputArea.style.left = "0";
+      inputArea.style.right = "0";
+    }
+
+    // Position quick actions bar above input
+    if (quickActionsBar && !quickActionsBar.classList.contains("collapsed")) {
+      quickActionsBar.style.position = "fixed";
+      quickActionsBar.style.bottom = "auto";
+      quickActionsBar.style.top = `${bottomOfViewport - inputArea.offsetHeight - quickActionsBar.offsetHeight}px`;
+      quickActionsBar.style.left = "0";
+      quickActionsBar.style.right = "0";
+    }
+  };
+
+  const resetInputPosition = () => {
+    if (inputArea) {
+      inputArea.style.position = "";
+      inputArea.style.bottom = "";
+      inputArea.style.top = "";
+      inputArea.style.left = "";
+      inputArea.style.right = "";
+    }
+    if (quickActionsBar) {
+      quickActionsBar.style.position = "";
+      quickActionsBar.style.bottom = "";
+      quickActionsBar.style.top = "";
+      quickActionsBar.style.left = "";
+      quickActionsBar.style.right = "";
+    }
+  };
+
+  // Track if input is focused
+  let inputFocused = false;
+
+  promptInput.addEventListener("focus", () => {
+    inputFocused = true;
+    // Small delay to let keyboard start opening
+    setTimeout(repositionInput, 50);
+  });
+
+  promptInput.addEventListener("blur", () => {
+    inputFocused = false;
+    // Delay reset to avoid flicker
+    setTimeout(() => {
+      if (!inputFocused) {
+        resetInputPosition();
+      }
+    }, 100);
+  });
+
+  // Update position as keyboard animates open/closed
+  window.visualViewport.addEventListener("resize", () => {
+    if (inputFocused) {
+      repositionInput();
+    }
+  });
+
+  window.visualViewport.addEventListener("scroll", () => {
+    if (inputFocused) {
+      repositionInput();
+    }
+  });
+}
+
+// ============================================
+// Memory UI (MCP Knowledge Graph)
+// ============================================
+
+// Memory state
+let memoryCache = { entities: [], relations: [] };
+let selectedEntity = null;
+let memorySearchQuery = "";
+let memoryActiveTab = "entities";
+
+// Memory elements
+const memoryBtn = document.getElementById("memory-btn");
+const memoryModal = document.getElementById("memory-modal");
+const closeMemoryModal = document.getElementById("close-memory-modal");
+const memorySearchInput = document.getElementById("memory-search-input");
+const memoryRefreshBtn = document.getElementById("memory-refresh-btn");
+const memoryTabs = document.querySelectorAll(".memory-tab");
+const memoryEntitiesList = document.getElementById("memory-entities-list");
+const memoryRelationsList = document.getElementById("memory-relations-list");
+const memoryStats = document.getElementById("memory-stats");
+
+// Entity detail elements
+const entityDetailModal = document.getElementById("entity-detail-modal");
+const closeEntityDetail = document.getElementById("close-entity-detail");
+const entityDetailBack = document.getElementById("entity-detail-back");
+const entityDetailTitle = document.getElementById("entity-detail-title");
+const entityDetailType = document.getElementById("entity-detail-type");
+const entityDetailObservations = document.getElementById(
+  "entity-detail-observations",
+);
+const entityDetailRelations = document.getElementById(
+  "entity-detail-relations",
+);
+
+// Open Memory Modal
+function openMemoryModal() {
+  memoryModal.classList.remove("hidden");
+  if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
+
+  // Load graph if not cached or stale
+  if (memoryCache.entities.length === 0) {
+    loadMemoryGraph();
+  } else {
+    renderMemoryContent();
+  }
+}
+
+// Close Memory Modal
+function closeMemoryModalFn() {
+  memoryModal.classList.add("hidden");
+}
+
+// Load memory graph from server
+function loadMemoryGraph(forceRefresh = false) {
+  if (!socket?.connected) {
+    renderMemoryError("Not connected to server");
+    return;
+  }
+
+  renderMemoryLoading();
+  socket.emit("memory-read-graph", { forceRefresh });
+}
+
+// Search memory
+function searchMemory(query) {
+  memorySearchQuery = query.trim();
+
+  if (memorySearchQuery.length === 0) {
+    // Show all from cache
+    renderMemoryContent();
+    return;
+  }
+
+  if (memorySearchQuery.length < 2) {
+    return; // Wait for at least 2 chars
+  }
+
+  // Filter client-side for instant feedback
+  renderMemoryContent();
+}
+
+// Render memory content (entities or relations based on active tab)
+function renderMemoryContent() {
+  renderEntitiesList();
+  renderRelationsList();
+  updateMemoryStats();
+}
+
+// Filter entities by search query
+function getFilteredEntities() {
+  if (!memorySearchQuery) {
+    return memoryCache.entities;
+  }
+
+  const query = memorySearchQuery.toLowerCase();
+  return memoryCache.entities.filter((entity) => {
+    const nameMatch = entity.name?.toLowerCase().includes(query);
+    const typeMatch = entity.entityType?.toLowerCase().includes(query);
+    const obsMatch = entity.observations?.some((obs) =>
+      obs.toLowerCase().includes(query),
+    );
+    return nameMatch || typeMatch || obsMatch;
+  });
+}
+
+// Filter relations by search query
+function getFilteredRelations() {
+  if (!memorySearchQuery) {
+    return memoryCache.relations;
+  }
+
+  const query = memorySearchQuery.toLowerCase();
+  return memoryCache.relations.filter((rel) => {
+    const fromMatch = rel.from?.toLowerCase().includes(query);
+    const toMatch = rel.to?.toLowerCase().includes(query);
+    const typeMatch = rel.relationType?.toLowerCase().includes(query);
+    return fromMatch || toMatch || typeMatch;
+  });
+}
+
+// Render entities list
+function renderEntitiesList() {
+  const entities = getFilteredEntities();
+
+  if (entities.length === 0) {
+    if (memorySearchQuery) {
+      memoryEntitiesList.innerHTML =
+        '<div class="memory-empty">No entities match your search</div>';
+    } else {
+      memoryEntitiesList.innerHTML =
+        '<div class="memory-empty">No entities in memory</div>';
+    }
+    return;
+  }
+
+  memoryEntitiesList.innerHTML = entities
+    .map((entity) => {
+      const obsPreview =
+        entity.observations?.slice(0, 2).join(" | ").substring(0, 100) || "";
+      const obsCount = entity.observations?.length || 0;
+
+      return `
+        <div class="entity-card" data-name="${escapeHtml(entity.name)}">
+          <div class="entity-card-header">
+            <span class="entity-name">${escapeHtml(entity.name)}</span>
+            <span class="entity-type-badge">${escapeHtml(entity.entityType || "Unknown")}</span>
+          </div>
+          ${obsPreview ? `<div class="entity-observations-preview">${escapeHtml(obsPreview)}${obsPreview.length >= 100 ? "..." : ""}</div>` : ""}
+          <div class="entity-observations-count">${obsCount} observation${obsCount !== 1 ? "s" : ""}</div>
+        </div>
+      `;
+    })
+    .join("");
+
+  // Attach click handlers
+  memoryEntitiesList.querySelectorAll(".entity-card").forEach((card) => {
+    card.onclick = () => {
+      const name = card.dataset.name;
+      const entity = memoryCache.entities.find((e) => e.name === name);
+      if (entity) {
+        openEntityDetail(entity);
+      }
+    };
+  });
+}
+
+// Render relations list
+function renderRelationsList() {
+  const relations = getFilteredRelations();
+
+  if (relations.length === 0) {
+    if (memorySearchQuery) {
+      memoryRelationsList.innerHTML =
+        '<div class="memory-empty">No relations match your search</div>';
+    } else {
+      memoryRelationsList.innerHTML =
+        '<div class="memory-empty">No relations in memory</div>';
+    }
+    return;
+  }
+
+  memoryRelationsList.innerHTML = relations
+    .map(
+      (rel) => `
+      <div class="relation-card" data-from="${escapeHtml(rel.from)}" data-to="${escapeHtml(rel.to)}">
+        <span class="relation-from">${escapeHtml(rel.from)}</span>
+        <span class="relation-arrow">→</span>
+        <span class="relation-type">${escapeHtml(rel.relationType)}</span>
+        <span class="relation-arrow">→</span>
+        <span class="relation-to">${escapeHtml(rel.to)}</span>
+      </div>
+    `,
+    )
+    .join("");
+
+  // Attach click handlers - clicking opens the "from" entity
+  memoryRelationsList.querySelectorAll(".relation-card").forEach((card) => {
+    card.onclick = () => {
+      const fromName = card.dataset.from;
+      const entity = memoryCache.entities.find((e) => e.name === fromName);
+      if (entity) {
+        openEntityDetail(entity);
+      }
+    };
+  });
+}
+
+// Update memory stats
+function updateMemoryStats() {
+  const entityCount = memoryCache.entities.length;
+  const relationCount = memoryCache.relations.length;
+  const filteredEntities = getFilteredEntities().length;
+  const filteredRelations = getFilteredRelations().length;
+
+  if (memorySearchQuery) {
+    memoryStats.textContent = `Showing ${filteredEntities}/${entityCount} entities, ${filteredRelations}/${relationCount} relations`;
+  } else {
+    memoryStats.textContent = `${entityCount} entities, ${relationCount} relations`;
+  }
+}
+
+// Render loading state
+function renderMemoryLoading() {
+  memoryEntitiesList.innerHTML = '<div class="memory-loading">Loading...</div>';
+  memoryRelationsList.innerHTML =
+    '<div class="memory-loading">Loading...</div>';
+  memoryStats.textContent = "Loading...";
+}
+
+// Render error state
+function renderMemoryError(message) {
+  const errorHtml = `<div class="memory-error">Error: ${escapeHtml(message)}</div>`;
+  memoryEntitiesList.innerHTML = errorHtml;
+  memoryRelationsList.innerHTML = errorHtml;
+  memoryStats.textContent = "Error loading memory";
+}
+
+// Open entity detail modal
+function openEntityDetail(entity) {
+  selectedEntity = entity;
+
+  // Set title and type
+  entityDetailTitle.textContent = entity.name;
+  entityDetailType.textContent = entity.entityType || "Unknown";
+
+  // Render observations
+  if (entity.observations && entity.observations.length > 0) {
+    entityDetailObservations.innerHTML = entity.observations
+      .map((obs) => `<div class="observation-item">${escapeHtml(obs)}</div>`)
+      .join("");
+  } else {
+    entityDetailObservations.innerHTML =
+      '<div class="memory-empty">No observations</div>';
+  }
+
+  // Render relations for this entity
+  const entityRelations = memoryCache.relations.filter(
+    (rel) => rel.from === entity.name || rel.to === entity.name,
+  );
+
+  if (entityRelations.length > 0) {
+    entityDetailRelations.innerHTML = entityRelations
+      .map((rel) => {
+        const isOutgoing = rel.from === entity.name;
+        const targetName = isOutgoing ? rel.to : rel.from;
+        const directionClass = isOutgoing ? "outgoing" : "incoming";
+        const directionLabel = isOutgoing ? "→" : "←";
+
+        return `
+          <div class="entity-relation-item ${directionClass}" data-target="${escapeHtml(targetName)}">
+            <span class="entity-relation-direction">${directionLabel}</span>
+            <span class="entity-relation-type">${escapeHtml(rel.relationType)}</span>
+            <span class="entity-relation-target">${escapeHtml(targetName)}</span>
+          </div>
+        `;
+      })
+      .join("");
+
+    // Attach click handlers to navigate to related entities
+    entityDetailRelations
+      .querySelectorAll(".entity-relation-target")
+      .forEach((el) => {
+        el.onclick = (e) => {
+          e.stopPropagation();
+          const targetName = el.parentElement.dataset.target;
+          const targetEntity = memoryCache.entities.find(
+            (ent) => ent.name === targetName,
+          );
+          if (targetEntity) {
+            openEntityDetail(targetEntity);
+          }
+        };
+      });
+  } else {
+    entityDetailRelations.innerHTML =
+      '<div class="memory-empty">No relations</div>';
+  }
+
+  // Show the detail modal
+  entityDetailModal.classList.remove("hidden");
+  if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
+}
+
+// Close entity detail modal
+function closeEntityDetailFn() {
+  entityDetailModal.classList.add("hidden");
+  selectedEntity = null;
+}
+
+// Switch memory tabs
+function switchMemoryTab(tabName) {
+  memoryActiveTab = tabName;
+
+  // Update tab buttons
+  memoryTabs.forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.tab === tabName);
+  });
+
+  // Update tab content
+  document
+    .getElementById("memory-entities-tab")
+    .classList.toggle("active", tabName === "entities");
+  document
+    .getElementById("memory-relations-tab")
+    .classList.toggle("active", tabName === "relations");
+}
+
+// Event handlers
+if (memoryBtn) {
+  memoryBtn.onclick = openMemoryModal;
+}
+
+if (closeMemoryModal) {
+  closeMemoryModal.onclick = closeMemoryModalFn;
+}
+
+if (memoryModal) {
+  memoryModal.onclick = (e) => {
+    if (e.target === memoryModal) closeMemoryModalFn();
+  };
+}
+
+if (memoryRefreshBtn) {
+  memoryRefreshBtn.onclick = () => {
+    loadMemoryGraph(true);
+    if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
+  };
+}
+
+if (memorySearchInput) {
+  let memorySearchDebounce = null;
+  memorySearchInput.oninput = () => {
+    clearTimeout(memorySearchDebounce);
+    memorySearchDebounce = setTimeout(() => {
+      searchMemory(memorySearchInput.value);
+    }, 200);
+  };
+}
+
+memoryTabs.forEach((tab) => {
+  tab.onclick = () => switchMemoryTab(tab.dataset.tab);
+});
+
+if (closeEntityDetail) {
+  closeEntityDetail.onclick = closeEntityDetailFn;
+}
+
+if (entityDetailBack) {
+  entityDetailBack.onclick = closeEntityDetailFn;
+}
+
+if (entityDetailModal) {
+  entityDetailModal.onclick = (e) => {
+    if (e.target === entityDetailModal) closeEntityDetailFn();
+  };
+}
+
+// Socket.io listeners for memory - track if already setup to prevent duplicates
+let memoryListenersSetup = false;
+
+function setupMemorySocketListeners() {
+  if (!socket || memoryListenersSetup) return;
+  memoryListenersSetup = true;
+
+  socket.on("memory-graph", (data) => {
+    console.log("Memory graph received:", data);
+    memoryCache = {
+      entities: Array.isArray(data.entities) ? data.entities : [],
+      relations: Array.isArray(data.relations) ? data.relations : [],
+    };
+    renderMemoryContent();
+  });
+
+  socket.on("memory-search-results", (data) => {
+    console.log("Memory search results:", data);
+    // Update entities with search results but keep relations from cache
+    if (data.query === memorySearchQuery) {
+      // Only update if this is for our current query
+      renderMemoryContent();
+    }
+  });
+
+  socket.on("memory-entity", (data) => {
+    console.log("Memory entity received:", data);
+    if (data.entity) {
+      openEntityDetail(data.entity);
+    }
+  });
+
+  socket.on("memory-error", (data) => {
+    console.error("Memory error:", data);
+    renderMemoryError(data.message || "Unknown error");
+    showToast(`Memory error: ${data.message}`);
+  });
+
+  // Reset flag on disconnect so listeners can be reattached on reconnect
+  socket.on("disconnect", () => {
+    memoryListenersSetup = false;
+  });
+}
+
+// Keyboard shortcut: Escape closes memory modals
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!entityDetailModal.classList.contains("hidden")) {
+      closeEntityDetailFn();
+    } else if (!memoryModal.classList.contains("hidden")) {
+      closeMemoryModalFn();
+    }
+  }
+});
+
+// ============================================
+// Browser Preview
+// ============================================
+
+// Browser Preview State
+let browserPreviewMode = "iframe"; // "iframe" | "puppeteer" | "html"
+let currentViewport = "desktop"; // "mobile" | "tablet" | "desktop"
+let puppeteerClickMode = false;
+let browserPreviewListenersSetup = false;
+
+// Browser Preview Elements
+const browserPreviewBtn = document.getElementById("browser-preview-btn");
+const browserPreviewModal = document.getElementById("browser-preview-modal");
+const closeBrowserPreviewBtn = document.getElementById("close-browser-preview");
+const browserPreviewPopoutBtn = document.getElementById(
+  "browser-preview-popout",
+);
+const browserPreviewTabs = document.querySelectorAll(".browser-preview-tab");
+const browserPreviewUrlInput = document.getElementById("browser-preview-url");
+const browserPreviewGoBtn = document.getElementById("browser-preview-go");
+const browserPreviewRefreshBtn = document.getElementById(
+  "browser-preview-refresh",
+);
+const browserPreviewContainer = document.querySelector(
+  ".browser-preview-container",
+);
+const browserPreviewStatusText = document.getElementById(
+  "browser-preview-status-text",
+);
+
+// Iframe tab elements
+const browserPreviewIframe = document.getElementById("browser-preview-iframe");
+
+// Puppeteer tab elements
+const puppeteerScreenshot = document.getElementById("puppeteer-screenshot");
+const puppeteerLoading = document.getElementById("puppeteer-loading");
+const puppeteerPlaceholder = document.getElementById("puppeteer-placeholder");
+const puppeteerClickModeBtn = document.getElementById("puppeteer-click-mode");
+const puppeteerDevtoolsBtn = document.getElementById("puppeteer-devtools");
+const puppeteerControls = document.querySelector(".puppeteer-controls");
+
+// HTML tab elements
+const htmlPreviewInput = document.getElementById("html-preview-input");
+const htmlPreviewRenderBtn = document.getElementById("html-preview-render");
+const htmlPreviewIframe = document.getElementById("html-preview-iframe");
+
+// DevTools elements
+const devtoolsModal = document.getElementById("devtools-modal");
+const closeDevtoolsBtn = document.getElementById("close-devtools");
+const devtoolsOutput = document.getElementById("devtools-output");
+const devtoolsInput = document.getElementById("devtools-input");
+const devtoolsRunBtn = document.getElementById("devtools-run");
+
+// Viewport buttons
+const viewportButtons = document.querySelectorAll(".viewport-btn");
+
+// Open Browser Preview Modal
+function openBrowserPreview() {
+  browserPreviewModal.classList.remove("hidden");
+  if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
+
+  // Setup socket listeners if not already
+  if (socket?.connected && !browserPreviewListenersSetup) {
+    setupBrowserPreviewSocketListeners();
+  }
+}
+
+// Close Browser Preview Modal
+function closeBrowserPreviewFn() {
+  browserPreviewModal.classList.add("hidden");
+}
+
+// Switch Browser Preview Tab
+function switchBrowserPreviewTab(tabName) {
+  browserPreviewMode = tabName;
+
+  // Update tab buttons
+  browserPreviewTabs.forEach((tab) => {
+    tab.classList.toggle("active", tab.dataset.tab === tabName);
+  });
+
+  // Update tab content
+  document
+    .getElementById("browser-preview-iframe-tab")
+    .classList.toggle("active", tabName === "iframe");
+  document
+    .getElementById("browser-preview-puppeteer-tab")
+    .classList.toggle("active", tabName === "puppeteer");
+  document
+    .getElementById("browser-preview-html-tab")
+    .classList.toggle("active", tabName === "html");
+
+  // Show/hide puppeteer controls
+  if (puppeteerControls) {
+    puppeteerControls.classList.toggle("hidden", tabName !== "puppeteer");
+  }
+
+  // Update URL bar placeholder based on mode
+  if (tabName === "html") {
+    browserPreviewUrlInput.placeholder = "N/A for HTML mode";
+    browserPreviewUrlInput.disabled = true;
+  } else {
+    browserPreviewUrlInput.placeholder = "http://localhost:5173";
+    browserPreviewUrlInput.disabled = false;
+  }
+}
+
+// Validate URL for security (prevent protocol injection)
+function validateBrowserUrl(urlString) {
+  if (!urlString || typeof urlString !== "string") return null;
+
+  // Normalize and parse URL
+  let url;
+  try {
+    // If no protocol, prepend http://
+    if (!urlString.match(/^https?:\/\//i)) {
+      urlString = "http://" + urlString;
+    }
+    url = new URL(urlString);
+  } catch {
+    return null;
+  }
+
+  // Only allow http and https protocols
+  if (!["http:", "https:"].includes(url.protocol)) {
+    return null;
+  }
+
+  return url.href;
+}
+
+// Navigate in Iframe mode
+function navigateIframe(url) {
+  if (!url) return;
+
+  const validatedUrl = validateBrowserUrl(url);
+  if (!validatedUrl) {
+    showToast("Invalid URL - only http/https allowed");
+    updateBrowserStatus("Invalid URL");
+    return;
+  }
+
+  browserPreviewUrlInput.value = validatedUrl;
+
+  try {
+    browserPreviewIframe.src = validatedUrl;
+    updateBrowserStatus("Loading...");
+  } catch (err) {
+    updateBrowserStatus("Error loading URL");
+    showToast("Failed to load URL in iframe");
+  }
+}
+
+// Navigate in Puppeteer mode
+function navigatePuppeteer(url) {
+  if (!url) return;
+
+  const validatedUrl = validateBrowserUrl(url);
+  if (!validatedUrl) {
+    showToast("Invalid URL - only http/https allowed");
+    updateBrowserStatus("Invalid URL");
+    return;
+  }
+
+  browserPreviewUrlInput.value = validatedUrl;
+
+  // Show loading state
+  puppeteerScreenshot.classList.add("hidden");
+  puppeteerPlaceholder.classList.add("hidden");
+  puppeteerLoading.classList.remove("hidden");
+  updateBrowserStatus("Navigating...");
+
+  // Send navigate request
+  socket.emit("browser-navigate", { url: validatedUrl });
+}
+
+// Take Puppeteer screenshot
+function takePuppeteerScreenshot() {
+  const viewport = getViewportDimensions();
+  puppeteerLoading.classList.remove("hidden");
+  updateBrowserStatus("Taking screenshot...");
+  socket.emit("browser-screenshot", viewport);
+}
+
+// Get viewport dimensions based on current setting
+function getViewportDimensions() {
+  switch (currentViewport) {
+    case "mobile":
+      return { width: 375, height: 667 };
+    case "tablet":
+      return { width: 768, height: 1024 };
+    default:
+      return { width: 1280, height: 800 };
+  }
+}
+
+// Set viewport
+function setViewport(viewport) {
+  currentViewport = viewport;
+
+  // Update button states
+  viewportButtons.forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.viewport === viewport);
+  });
+
+  // Update container class
+  browserPreviewContainer.classList.remove(
+    "viewport-mobile",
+    "viewport-tablet",
+    "viewport-desktop",
+  );
+  browserPreviewContainer.classList.add(`viewport-${viewport}`);
+
+  // If in puppeteer mode, retake screenshot with new viewport
+  if (
+    browserPreviewMode === "puppeteer" &&
+    !puppeteerScreenshot.classList.contains("hidden")
+  ) {
+    takePuppeteerScreenshot();
+  }
+}
+
+// Render HTML Preview
+// Note: HTML preview is intentionally for testing/development use
+// The iframe is sandboxed without allow-same-origin to prevent access to parent
+function renderHtmlPreview() {
+  const html = htmlPreviewInput.value;
+  if (!html.trim()) {
+    showToast("Enter some HTML to render");
+    return;
+  }
+
+  // Wrap in a basic HTML document if not already complete
+  let wrappedHtml = html;
+  if (
+    !html.toLowerCase().includes("<!doctype") &&
+    !html.toLowerCase().includes("<html")
+  ) {
+    wrappedHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body>${html}</body></html>`;
+  }
+
+  htmlPreviewIframe.srcdoc = wrappedHtml;
+  updateBrowserStatus("HTML rendered");
+}
+
+// Handle screenshot click for coordinate-based interaction
+function handleScreenshotClick(event) {
+  if (!puppeteerClickMode) return;
+
+  const rect = puppeteerScreenshot.getBoundingClientRect();
+  const naturalWidth = puppeteerScreenshot.naturalWidth;
+  const naturalHeight = puppeteerScreenshot.naturalHeight;
+
+  // Validate dimensions to prevent division by zero
+  if (!rect.width || !rect.height || !naturalWidth || !naturalHeight) {
+    showToast("Screenshot not fully loaded");
+    return;
+  }
+
+  const scaleX = naturalWidth / rect.width;
+  const scaleY = naturalHeight / rect.height;
+
+  const x = Math.round((event.clientX - rect.left) * scaleX);
+  const y = Math.round((event.clientY - rect.top) * scaleY);
+
+  // Validate coordinates are within bounds
+  if (x < 0 || y < 0 || x > naturalWidth || y > naturalHeight) {
+    showToast("Click outside screenshot bounds");
+    return;
+  }
+
+  updateBrowserStatus(`Clicking at (${x}, ${y})...`);
+  socket.emit("browser-click", { x, y });
+}
+
+// Update browser status text
+function updateBrowserStatus(text) {
+  if (browserPreviewStatusText) {
+    browserPreviewStatusText.textContent = text;
+  }
+}
+
+// Open DevTools modal
+function openDevtools() {
+  devtoolsModal.classList.remove("hidden");
+}
+
+// Close DevTools modal
+function closeDevtoolsFn() {
+  devtoolsModal.classList.add("hidden");
+}
+
+// Run JavaScript in DevTools
+function runDevtoolsScript() {
+  const script = devtoolsInput.value.trim();
+  if (!script) return;
+
+  // Add input to output
+  const inputEntry = document.createElement("div");
+  inputEntry.className = "log-entry";
+  inputEntry.innerHTML = `<div class="log-input">${escapeHtml(script)}</div>`;
+  devtoolsOutput.appendChild(inputEntry);
+
+  // Send to server
+  socket.emit("browser-evaluate", { script });
+
+  // Clear input
+  devtoolsInput.value = "";
+
+  // Scroll to bottom
+  devtoolsOutput.scrollTop = devtoolsOutput.scrollHeight;
+}
+
+// Add log entry to DevTools output
+function addDevtoolsLog(content, isError = false) {
+  const entry = document.createElement("div");
+  entry.className = "log-entry";
+  const outputClass = isError ? "log-error" : "log-output";
+  entry.innerHTML = `<div class="${outputClass}">${escapeHtml(String(content))}</div>`;
+  devtoolsOutput.appendChild(entry);
+  devtoolsOutput.scrollTop = devtoolsOutput.scrollHeight;
+}
+
+// Setup Browser Preview Socket Listeners
+function setupBrowserPreviewSocketListeners() {
+  if (!socket || browserPreviewListenersSetup) return;
+  browserPreviewListenersSetup = true;
+
+  socket.on("browser-navigated", (data) => {
+    console.log("Browser navigated:", data);
+    if (data.success) {
+      updateBrowserStatus(`Loaded: ${data.url}`);
+      // Take screenshot after navigation
+      takePuppeteerScreenshot();
+    } else {
+      updateBrowserStatus(`Error: ${data.error}`);
+      puppeteerLoading.classList.add("hidden");
+      puppeteerPlaceholder.classList.remove("hidden");
+      showToast(`Navigation failed: ${data.error}`);
+    }
+  });
+
+  socket.on("browser-screenshot-ready", (data) => {
+    console.log("Screenshot ready:", data.success);
+    puppeteerLoading.classList.add("hidden");
+
+    if (data.success && data.data) {
+      puppeteerPlaceholder.classList.add("hidden");
+      puppeteerScreenshot.src = data.data;
+      puppeteerScreenshot.classList.remove("hidden");
+      updateBrowserStatus("Screenshot captured");
+    } else {
+      updateBrowserStatus(`Screenshot error: ${data.error}`);
+      showToast(`Screenshot failed: ${data.error}`);
+    }
+  });
+
+  socket.on("browser-clicked", (data) => {
+    console.log("Browser clicked:", data);
+    if (data.success) {
+      updateBrowserStatus("Clicked - taking new screenshot...");
+      // Take a new screenshot to show the result
+      setTimeout(takePuppeteerScreenshot, 500);
+    } else {
+      updateBrowserStatus(`Click error: ${data.error}`);
+    }
+  });
+
+  socket.on("browser-evaluated", (data) => {
+    console.log("Browser evaluated:", data);
+    if (data.success) {
+      addDevtoolsLog(JSON.stringify(data.result, null, 2));
+    } else {
+      addDevtoolsLog(data.error, true);
+    }
+  });
+
+  socket.on("browser-filled", (data) => {
+    console.log("Browser filled:", data);
+    if (data.success) {
+      updateBrowserStatus("Input filled - taking new screenshot...");
+      setTimeout(takePuppeteerScreenshot, 300);
+    } else {
+      updateBrowserStatus(`Fill error: ${data.error}`);
+    }
+  });
+
+  socket.on("browser-error", (data) => {
+    console.error("Browser error:", data);
+    updateBrowserStatus(`Error: ${data.message}`);
+    puppeteerLoading.classList.add("hidden");
+    showToast(`Browser error: ${data.message}`);
+  });
+
+  // Reset flag on disconnect
+  socket.on("disconnect", () => {
+    browserPreviewListenersSetup = false;
+  });
+}
+
+// Event Handlers - Browser Preview Button
+if (browserPreviewBtn) {
+  browserPreviewBtn.onclick = openBrowserPreview;
+}
+
+// Close button
+if (closeBrowserPreviewBtn) {
+  closeBrowserPreviewBtn.onclick = closeBrowserPreviewFn;
+}
+
+// Modal background click to close
+if (browserPreviewModal) {
+  browserPreviewModal.onclick = (e) => {
+    if (e.target === browserPreviewModal) closeBrowserPreviewFn();
+  };
+}
+
+// Popout button - open URL in new window
+if (browserPreviewPopoutBtn) {
+  browserPreviewPopoutBtn.onclick = () => {
+    const url = browserPreviewUrlInput.value.trim();
+    if (url) {
+      window.open(url, "_blank");
+    }
+  };
+}
+
+// Tab switching
+browserPreviewTabs.forEach((tab) => {
+  tab.onclick = () => switchBrowserPreviewTab(tab.dataset.tab);
+});
+
+// URL bar - Go button
+if (browserPreviewGoBtn) {
+  browserPreviewGoBtn.onclick = () => {
+    const url = browserPreviewUrlInput.value.trim();
+    if (!url) {
+      showToast("Enter a URL");
+      return;
+    }
+
+    if (browserPreviewMode === "iframe") {
+      navigateIframe(url);
+    } else if (browserPreviewMode === "puppeteer") {
+      navigatePuppeteer(url);
+    }
+  };
+}
+
+// URL bar - Refresh button
+if (browserPreviewRefreshBtn) {
+  browserPreviewRefreshBtn.onclick = () => {
+    if (browserPreviewMode === "iframe") {
+      browserPreviewIframe.src = browserPreviewIframe.src;
+      updateBrowserStatus("Refreshing...");
+    } else if (browserPreviewMode === "puppeteer") {
+      takePuppeteerScreenshot();
+    }
+  };
+}
+
+// URL bar - Enter to navigate
+if (browserPreviewUrlInput) {
+  browserPreviewUrlInput.onkeydown = (e) => {
+    if (e.key === "Enter") {
+      browserPreviewGoBtn.click();
+    }
+  };
+}
+
+// Viewport buttons
+viewportButtons.forEach((btn) => {
+  btn.onclick = () => setViewport(btn.dataset.viewport);
+});
+
+// Puppeteer click mode toggle
+if (puppeteerClickModeBtn) {
+  puppeteerClickModeBtn.onclick = () => {
+    puppeteerClickMode = !puppeteerClickMode;
+    puppeteerClickModeBtn.classList.toggle("active", puppeteerClickMode);
+    puppeteerScreenshot.classList.toggle("click-mode", puppeteerClickMode);
+    updateBrowserStatus(
+      puppeteerClickMode
+        ? "Click mode ON - click on screenshot to interact"
+        : "Click mode OFF",
+    );
+  };
+}
+
+// Puppeteer screenshot click handler
+if (puppeteerScreenshot) {
+  puppeteerScreenshot.onclick = handleScreenshotClick;
+}
+
+// DevTools button
+if (puppeteerDevtoolsBtn) {
+  puppeteerDevtoolsBtn.onclick = openDevtools;
+}
+
+// DevTools close button
+if (closeDevtoolsBtn) {
+  closeDevtoolsBtn.onclick = closeDevtoolsFn;
+}
+
+// DevTools modal background click to close
+if (devtoolsModal) {
+  devtoolsModal.onclick = (e) => {
+    if (e.target === devtoolsModal) closeDevtoolsFn();
+  };
+}
+
+// DevTools run button
+if (devtoolsRunBtn) {
+  devtoolsRunBtn.onclick = runDevtoolsScript;
+}
+
+// DevTools input - Ctrl+Enter to run
+if (devtoolsInput) {
+  devtoolsInput.onkeydown = (e) => {
+    if (e.key === "Enter" && e.ctrlKey) {
+      e.preventDefault();
+      runDevtoolsScript();
+    }
+  };
+}
+
+// HTML preview render button
+if (htmlPreviewRenderBtn) {
+  htmlPreviewRenderBtn.onclick = renderHtmlPreview;
+}
+
+// Iframe load event to update status
+if (browserPreviewIframe) {
+  browserPreviewIframe.onload = () => {
+    updateBrowserStatus("Loaded");
+  };
+  browserPreviewIframe.onerror = () => {
+    updateBrowserStatus("Failed to load");
+  };
+}
+
+// Keyboard shortcut: Escape closes browser preview modals
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!devtoolsModal.classList.contains("hidden")) {
+      closeDevtoolsFn();
+    } else if (!browserPreviewModal.classList.contains("hidden")) {
+      closeBrowserPreviewFn();
+    }
   }
 });

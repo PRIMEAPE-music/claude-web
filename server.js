@@ -18,7 +18,15 @@ import {
   getSession,
   getBufferedResponse,
   clearBuffer,
+  setSessionModel,
 } from "./claude-runner.js";
+import {
+  readGraph,
+  searchNodes,
+  getEntity,
+  invalidateCache as invalidateMemoryCache,
+} from "./memory-service.js";
+import * as puppeteerService from "./puppeteer-service.js";
 
 // Configure web-push with VAPID keys
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
@@ -278,12 +286,18 @@ io.on("connection", (socket) => {
 
   socket.on("start-session", (data) => {
     currentWorkingDir = expandPath(data?.workingDir || HOME);
-    sessionId = createSession(currentWorkingDir);
+    // Validate model - only allow known values
+    const validModels = ["opus", "sonnet", "haiku"];
+    const model = validModels.includes(data?.model) ? data.model : "opus";
+    sessionId = createSession(currentWorkingDir, model);
     socket.emit("session-started", {
       sessionId,
       workingDir: currentWorkingDir,
+      model,
     });
-    console.log(`Session started: ${sessionId} in ${currentWorkingDir}`);
+    console.log(
+      `Session started: ${sessionId} in ${currentWorkingDir} (model: ${model})`,
+    );
   });
 
   // Restore an existing session by ID
@@ -768,6 +782,205 @@ io.on("connection", (socket) => {
       socket.emit("conversation-deleted", { id: data.id });
     } catch (err) {
       socket.emit("error", { message: `Failed to delete: ${err.message}` });
+    }
+  });
+
+  // ===============================
+  // Memory (MCP) handlers - MVP read-only
+  // ===============================
+
+  socket.on("memory-read-graph", async (data) => {
+    try {
+      const forceRefresh = data?.forceRefresh === true;
+      console.log(
+        `[${sessionId || socket.id}] Memory: read graph (refresh: ${forceRefresh})`,
+      );
+      const graph = await readGraph(forceRefresh);
+      socket.emit("memory-graph", graph);
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Memory read error:`,
+        err.message,
+      );
+      socket.emit("memory-error", {
+        operation: "read-graph",
+        message: err.message,
+      });
+    }
+  });
+
+  socket.on("memory-search", async (data) => {
+    try {
+      const query = data?.query;
+      if (!query || typeof query !== "string" || query.trim().length === 0) {
+        socket.emit("memory-search-results", { entities: [], query: "" });
+        return;
+      }
+      console.log(`[${sessionId || socket.id}] Memory: search "${query}"`);
+      const results = await searchNodes(query);
+      socket.emit("memory-search-results", { ...results, query });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Memory search error:`,
+        err.message,
+      );
+      socket.emit("memory-error", {
+        operation: "search",
+        message: err.message,
+      });
+    }
+  });
+
+  socket.on("memory-get-entity", async (data) => {
+    try {
+      const name = data?.name;
+      if (!name || typeof name !== "string") {
+        socket.emit("memory-error", {
+          operation: "get-entity",
+          message: "Entity name required",
+        });
+        return;
+      }
+      console.log(`[${sessionId || socket.id}] Memory: get entity "${name}"`);
+      const entity = await getEntity(name);
+      socket.emit("memory-entity", { entity, name });
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Memory get entity error:`,
+        err.message,
+      );
+      socket.emit("memory-error", {
+        operation: "get-entity",
+        message: err.message,
+      });
+    }
+  });
+
+  // ============================================
+  // Browser Preview (Puppeteer) Events
+  // ============================================
+
+  socket.on("browser-navigate", async (data) => {
+    try {
+      const url = data?.url;
+      if (!url || typeof url !== "string") {
+        socket.emit("browser-error", { message: "URL required" });
+        return;
+      }
+      console.log(`[${sessionId || socket.id}] Browser: navigate to "${url}"`);
+      const result = await puppeteerService.navigate(url);
+      socket.emit("browser-navigated", result);
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Browser navigate error:`,
+        err.message,
+      );
+      socket.emit("browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("browser-screenshot", async (data) => {
+    try {
+      // Validate and clamp viewport dimensions
+      const MAX_WIDTH = 3840;
+      const MAX_HEIGHT = 2160;
+      const MIN_SIZE = 100;
+
+      let width = parseInt(data?.width) || 1280;
+      let height = parseInt(data?.height) || 800;
+
+      // Clamp to reasonable bounds
+      width = Math.max(MIN_SIZE, Math.min(MAX_WIDTH, width));
+      height = Math.max(MIN_SIZE, Math.min(MAX_HEIGHT, height));
+
+      const options = {
+        width,
+        height,
+        name: `screenshot_${Date.now()}`,
+      };
+      console.log(
+        `[${sessionId || socket.id}] Browser: screenshot (${options.width}x${options.height})`,
+      );
+      const result = await puppeteerService.takeScreenshot(options);
+      socket.emit("browser-screenshot-ready", result);
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Browser screenshot error:`,
+        err.message,
+      );
+      socket.emit("browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("browser-click", async (data) => {
+    try {
+      if (data?.x !== undefined && data?.y !== undefined) {
+        // Coordinate-based click
+        console.log(
+          `[${sessionId || socket.id}] Browser: click at (${data.x}, ${data.y})`,
+        );
+        const result = await puppeteerService.clickAt(data.x, data.y);
+        socket.emit("browser-clicked", result);
+      } else if (data?.selector) {
+        // Selector-based click
+        console.log(
+          `[${sessionId || socket.id}] Browser: click "${data.selector}"`,
+        );
+        const result = await puppeteerService.click(data.selector);
+        socket.emit("browser-clicked", result);
+      } else {
+        socket.emit("browser-error", {
+          message: "Selector or coordinates required",
+        });
+      }
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Browser click error:`,
+        err.message,
+      );
+      socket.emit("browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("browser-evaluate", async (data) => {
+    try {
+      const script = data?.script;
+      if (!script || typeof script !== "string") {
+        socket.emit("browser-error", { message: "Script required" });
+        return;
+      }
+      console.log(
+        `[${sessionId || socket.id}] Browser: evaluate "${script.substring(0, 50)}..."`,
+      );
+      const result = await puppeteerService.evaluate(script);
+      socket.emit("browser-evaluated", result);
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Browser evaluate error:`,
+        err.message,
+      );
+      socket.emit("browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("browser-fill", async (data) => {
+    try {
+      const { selector, value } = data || {};
+      if (!selector || typeof selector !== "string") {
+        socket.emit("browser-error", { message: "Selector required" });
+        return;
+      }
+      console.log(
+        `[${sessionId || socket.id}] Browser: fill "${selector}" with "${(value || "").substring(0, 20)}..."`,
+      );
+      const result = await puppeteerService.fill(selector, value);
+      socket.emit("browser-filled", result);
+    } catch (err) {
+      console.error(
+        `[${sessionId || socket.id}] Browser fill error:`,
+        err.message,
+      );
+      socket.emit("browser-error", { message: err.message });
     }
   });
 
