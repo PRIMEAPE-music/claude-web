@@ -22,6 +22,7 @@ const dirInput = document.getElementById("dir-input");
 const dirSetBtn = document.getElementById("dir-set-btn");
 const welcomeMessage = document.getElementById("welcome-message");
 const notificationSound = document.getElementById("notification-sound");
+notificationSound.volume = 0.1; // 90% quieter
 const uploadBtn = document.getElementById("upload-btn");
 const fileUpload = document.getElementById("file-upload");
 const imagePreviewArea = document.getElementById("image-preview-area");
@@ -45,6 +46,7 @@ let responseStartTime = null;
 let sessionTokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 let currentToolContainer = null; // Groups all tools for current response
 let toolCount = 0;
+let currentResponseStats = null; // Store stats for adding badge after final render
 const RENDER_DEBOUNCE_MS = 50; // Balance between responsiveness and performance
 
 // Conversation state
@@ -417,19 +419,30 @@ function connect(token) {
         sessionTokens.input += usage.input_tokens || 0;
         sessionTokens.output += usage.output_tokens || 0;
         updateSessionTokenDisplay();
-        if (currentResponse) {
-          addTokenBadge(currentResponse, usage, chunk.duration);
-        }
+        // Store stats for adding badge after render
+        currentResponseStats = { usage, duration: chunk.duration };
       }
     }
 
     // Render the markdown
-    renderMarkdown(currentResponse);
-    if (settings.autoScroll) scrollToBottom();
+    if (currentResponse) {
+      renderMarkdown(currentResponse);
+      if (settings.autoScroll) scrollToBottom();
+
+      // Add token badge after render (so it doesn't get overwritten)
+      if (currentResponseStats) {
+        addTokenBadge(
+          currentResponse,
+          currentResponseStats.usage,
+          currentResponseStats.duration,
+        );
+      }
+    }
 
     // If response is complete, finalize it
-    if (data.isComplete) {
+    if (data.isComplete && currentResponse) {
       currentResponse.classList.remove("streaming");
+      currentResponseStats = null;
       conversationMessages.push({
         type: "assistant",
         content: currentResponse.dataset.raw || "",
@@ -497,6 +510,7 @@ function connect(token) {
     responseStartTime = Date.now();
     currentToolContainer = null; // Reset tool container for new response
     toolCount = 0;
+    currentResponseStats = null; // Reset stats for new response
     sendBtn.classList.add("hidden");
     stopBtn.classList.remove("hidden");
     welcomeMessage?.remove();
@@ -616,7 +630,7 @@ function connect(token) {
       addToolToContainer(chunk.name, chunk.input);
       if (settings.autoScroll) scrollToBottom();
     } else if (chunk.type === "stats") {
-      // Update session tokens and show on message
+      // Update session tokens and store stats for badge (added after final render)
       const usage = chunk.usage || {};
       sessionTokens.input += usage.input_tokens || 0;
       sessionTokens.output += usage.output_tokens || 0;
@@ -624,9 +638,8 @@ function connect(token) {
       sessionTokens.cacheWrite += usage.cache_creation_input_tokens || 0;
       updateSessionTokenDisplay();
       updateContextDisplay(usage);
-      if (currentResponse) {
-        addTokenBadge(currentResponse, usage, chunk.duration);
-      }
+      // Store stats to add badge after final renderMarkdown in response-end
+      currentResponseStats = { usage, duration: chunk.duration };
     } else if (chunk.type === "error") {
       const progress = currentResponse.querySelector(".progress-indicator");
       if (progress) progress.remove();
@@ -679,11 +692,21 @@ function connect(token) {
       currentResponse.classList.remove("streaming");
       const progress = currentResponse.querySelector(".progress-indicator");
       if (progress) progress.remove();
+
+      // Add token badge after final render (stats arrive before response-end)
+      if (currentResponseStats) {
+        addTokenBadge(
+          currentResponse,
+          currentResponseStats.usage,
+          currentResponseStats.duration,
+        );
+      }
     }
 
     isStreaming = false;
     updateActionsBarState();
     currentResponse = null;
+    currentResponseStats = null; // Reset stats for next response
     sendBtn.classList.remove("hidden");
     stopBtn.classList.add("hidden");
 
@@ -959,7 +982,13 @@ function getOrCreateToolContainer() {
       container.classList.contains("collapsed") ? "▶" : "▼";
   };
 
-  messages.appendChild(container);
+  // Insert tool container BEFORE currentResponse so tools appear above the text
+  // This matches the logical order: tools execute first, then Claude generates text
+  if (currentResponse && currentResponse.parentNode === messages) {
+    messages.insertBefore(container, currentResponse);
+  } else {
+    messages.appendChild(container);
+  }
   currentToolContainer = container;
   return container;
 }
