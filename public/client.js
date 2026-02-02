@@ -385,12 +385,18 @@ function connect(token) {
     socket.emit("visibility-change", { visible: isPageVisible });
 
     // Restore conversation history from saved conversation
+    // Note: We load conversation first, THEN check for buffered response
+    // The buffered-response handler will append to the loaded conversation
     if (currentConversationId) {
+      // Load conversation and wait for it before checking buffered response
+      socket.once("conversation-loaded", () => {
+        socket.emit("get-buffered-response");
+      });
       socket.emit("load-conversation", { id: currentConversationId });
+    } else {
+      // No conversation to load, just check for buffered response
+      socket.emit("get-buffered-response");
     }
-
-    // Check for any buffered response from when we disconnected
-    socket.emit("get-buffered-response");
   });
 
   // Handle buffered response (for when client reconnects after disconnect)
@@ -598,6 +604,12 @@ function connect(token) {
       if (settings.autoScroll) scrollToBottom();
     } else if (chunk.type === "tool_start") {
       // Update progress indicator with tool info
+      console.log(
+        "[Tool] tool_start received:",
+        chunk.name,
+        "showTools:",
+        settings.showTools,
+      );
       updateProgressStatus(`Using ${chunk.name}...`);
       if (settings.showTools) {
         const inputStr =
@@ -606,6 +618,8 @@ function connect(token) {
             : JSON.stringify(chunk.input, null, 2);
         addToolToContainer(chunk.name, inputStr || "(executing...)", chunk.id);
         if (settings.autoScroll) scrollToBottom();
+      } else {
+        console.log("[Tool] showTools is false, skipping container");
       }
     } else if (chunk.type === "tool_result") {
       // Tool finished - update progress and tool message
@@ -979,12 +993,23 @@ function addMessage(content, type, images = []) {
 function getOrCreateToolContainer() {
   // Check if existing container is still in the DOM (not stale)
   if (currentToolContainer && currentToolContainer.parentNode === messages) {
+    console.log("[Tool] Reusing existing container");
     return currentToolContainer;
   }
   // Reset if stale reference
+  if (currentToolContainer) {
+    console.log(
+      "[Tool] Container stale, parentNode:",
+      currentToolContainer.parentNode,
+    );
+  }
   currentToolContainer = null;
   toolCount = 0;
 
+  console.log(
+    "[Tool] Creating new container, currentResponse:",
+    !!currentResponse,
+  );
   const container = document.createElement("div");
   container.className = "tool-container collapsed";
 
@@ -1014,6 +1039,7 @@ function getOrCreateToolContainer() {
   // Insert tool container BEFORE currentResponse so tools appear above the text
   // This matches the logical order: tools execute first, then Claude generates text
   if (currentResponse && currentResponse.parentNode === messages) {
+    console.log("[Tool] Inserting container before currentResponse");
     messages.insertBefore(container, currentResponse);
   } else {
     messages.appendChild(container);
