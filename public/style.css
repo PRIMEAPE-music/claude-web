@@ -216,6 +216,97 @@ header {
   color: var(--success);
 }
 
+/* Header Dropdown Menu */
+.header-dropdown {
+  position: relative;
+}
+
+#header-dropdown-btn {
+  font-size: 18px;
+  font-weight: bold;
+}
+
+.header-dropdown-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  overflow: hidden;
+  animation: dropdownFadeIn 0.15s ease;
+}
+
+@keyframes dropdownFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.dropdown-item:hover {
+  background: var(--bg);
+}
+
+.dropdown-item:active {
+  background: var(--primary);
+  color: white;
+}
+
+.dropdown-icon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+}
+
+/* Header Text Button (Quick Actions Settings) */
+.header-text-btn {
+  padding: 6px 10px;
+  border: none;
+  border-radius: 4px;
+  background: var(--primary);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  transition:
+    background 0.2s,
+    transform 0.1s;
+  white-space: nowrap;
+}
+
+.header-text-btn:hover {
+  background: var(--primary-hover);
+}
+
+.header-text-btn:active {
+  transform: scale(0.95);
+}
+
 /* Search Bar */
 #search-bar {
   display: flex;
@@ -409,6 +500,10 @@ header {
   background: var(--bg);
 }
 
+.sidebar-btn-icon {
+  margin-right: 6px;
+}
+
 /* Working directory input */
 #dir-input-wrap {
   display: flex;
@@ -434,34 +529,6 @@ header {
   color: white;
   font-size: 13px;
   cursor: pointer;
-}
-
-/* Quick actions */
-#quick-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.quick-btn {
-  padding: 10px 14px;
-  border: none;
-  border-radius: 20px;
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-  transition:
-    background 0.2s,
-    transform 0.1s;
-}
-
-.quick-btn:hover {
-  background: var(--primary);
-}
-
-.quick-btn:active {
-  transform: scale(0.95);
 }
 
 /* File browser */

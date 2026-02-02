@@ -11,6 +11,8 @@ const sendBtn = document.getElementById("send-btn");
 const stopBtn = document.getElementById("stop-btn");
 const voiceBtn = document.getElementById("voice-btn");
 const menuBtn = document.getElementById("menu-btn");
+const headerDropdownBtn = document.getElementById("header-dropdown-btn");
+const headerDropdownMenu = document.getElementById("header-dropdown-menu");
 const sidebar = document.getElementById("sidebar");
 const sidebarOverlay = document.getElementById("sidebar-overlay");
 const closeSidebarBtn = document.getElementById("close-sidebar");
@@ -1555,6 +1557,31 @@ function scrollToBottom() {
   messages.scrollTop = messages.scrollHeight;
 }
 
+// Header dropdown handlers
+headerDropdownBtn.onclick = (e) => {
+  e.stopPropagation();
+  headerDropdownMenu.classList.toggle("hidden");
+  if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
+};
+
+// Close dropdown when clicking outside
+document.addEventListener("click", (e) => {
+  if (
+    !headerDropdownMenu.classList.contains("hidden") &&
+    !headerDropdownMenu.contains(e.target) &&
+    e.target !== headerDropdownBtn
+  ) {
+    headerDropdownMenu.classList.add("hidden");
+  }
+});
+
+// Close dropdown when clicking a dropdown item
+headerDropdownMenu.addEventListener("click", (e) => {
+  if (e.target.closest(".dropdown-item")) {
+    headerDropdownMenu.classList.add("hidden");
+  }
+});
+
 // Sidebar handlers
 menuBtn.onclick = openSidebar;
 closeSidebarBtn.onclick = closeSidebar;
@@ -2210,36 +2237,12 @@ let quickActions = JSON.parse(
 ) || [...defaultQuickActions];
 const actionsModal = document.getElementById("actions-modal");
 const actionsList = document.getElementById("actions-list");
-const manageActionsBtn = document.getElementById("manage-actions-btn");
+const quickActionsSettingsBtn = document.getElementById(
+  "quick-actions-settings-btn",
+);
 const closeActionsModalBtn = document.getElementById("close-actions-modal");
 const addActionBtn = document.getElementById("add-action-btn");
 const resetActionsBtn = document.getElementById("reset-actions-btn");
-
-// Render quick actions in sidebar
-function renderQuickActions() {
-  const quickActionsContainer = document.getElementById("quick-actions");
-  quickActionsContainer.innerHTML = quickActions
-    .map(
-      (action, index) => `
-    <button class="quick-btn" data-index="${index}" data-prompt="${escapeHtml(action.prompt)}">
-      ${escapeHtml(action.emoji)} ${escapeHtml(action.label)}
-    </button>
-  `,
-    )
-    .join("");
-
-  // Re-attach click handlers
-  quickActionsContainer.querySelectorAll(".quick-btn").forEach((btn) => {
-    btn.onclick = () => {
-      const prompt = btn.dataset.prompt;
-      if (prompt && socket && !isStreaming) {
-        promptInput.value = prompt;
-        sendMessage();
-        closeSidebar();
-      }
-    };
-  });
-}
 
 // Quick Actions Bar (above input area)
 const quickActionsBar = document.getElementById("quick-actions-bar");
@@ -2357,7 +2360,6 @@ function renderActionsModal() {
         quickActions.splice(index, 1);
         saveQuickActions();
         renderActionsModal();
-        renderQuickActions();
         renderActionsBar();
       }
     };
@@ -2386,7 +2388,6 @@ function renderActionsModal() {
       if (moved) {
         saveQuickActions();
         renderActionsModal();
-        renderQuickActions();
         renderActionsBar();
         if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
       }
@@ -2433,7 +2434,6 @@ function editAction(index) {
     };
     saveQuickActions();
     renderActionsModal();
-    renderQuickActions();
     renderActionsBar();
   };
 
@@ -2513,7 +2513,6 @@ function attachDragHandlers() {
         quickActions.splice(targetIndex, 0, removed);
         saveQuickActions();
         renderActionsModal();
-        renderQuickActions();
         renderActionsBar();
       }
     };
@@ -2521,7 +2520,7 @@ function attachDragHandlers() {
 }
 
 // Modal handlers
-manageActionsBtn.onclick = () => {
+quickActionsSettingsBtn.onclick = () => {
   renderActionsModal();
   actionsModal.classList.remove("hidden");
   if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(10);
@@ -2542,14 +2541,12 @@ resetActionsBtn.onclick = () => {
     quickActions = [...defaultQuickActions];
     saveQuickActions();
     renderActionsModal();
-    renderQuickActions();
     renderActionsBar();
     showToast("Quick actions reset to default");
   }
 };
 
 // Initialize quick actions on load
-renderQuickActions();
 renderActionsBar();
 
 // ============================================

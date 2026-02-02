@@ -48,28 +48,36 @@
             <span id="working-dir" title="Working directory">~</span>
           </div>
           <div class="header-right">
-            <button id="project-btn" class="icon-btn" title="Projects">
-              📁
-            </button>
-            <button
-              id="search-btn"
-              class="icon-btn"
-              title="Search messages (Ctrl+F)"
-            >
-              🔍
-            </button>
-            <button id="memory-btn" class="icon-btn" title="Memory">🧠</button>
-            <button
-              id="browser-preview-btn"
-              class="icon-btn"
-              title="Browser Preview"
-            >
-              🌐
-            </button>
             <span id="status" title="Connection status">●</span>
-            <button id="settings-btn" class="icon-btn" title="Settings">
-              ⚙
-            </button>
+            <div class="header-dropdown">
+              <button
+                id="header-dropdown-btn"
+                class="icon-btn"
+                title="More options"
+              >
+                ⋮
+              </button>
+              <div
+                id="header-dropdown-menu"
+                class="header-dropdown-menu hidden"
+              >
+                <button id="project-btn" class="dropdown-item">
+                  <span class="dropdown-icon">📁</span> Projects
+                </button>
+                <button id="search-btn" class="dropdown-item">
+                  <span class="dropdown-icon">🔍</span> Search
+                </button>
+                <button id="memory-btn" class="dropdown-item">
+                  <span class="dropdown-icon">🧠</span> Memory
+                </button>
+                <button id="browser-preview-btn" class="dropdown-item">
+                  <span class="dropdown-icon">🌐</span> Browser Preview
+                </button>
+                <button id="quick-actions-settings-btn" class="dropdown-item">
+                  <span class="dropdown-icon">⚡</span> Quick Actions
+                </button>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -161,23 +169,6 @@
           </div>
 
           <div class="sidebar-section">
-            <div class="section-header">
-              <h3>Quick Actions</h3>
-              <button
-                id="manage-actions-btn"
-                class="manage-btn"
-                title="Manage Actions"
-                aria-label="Manage Quick Actions"
-              >
-                ⚙
-              </button>
-            </div>
-            <div id="quick-actions">
-              <!-- Quick actions are rendered dynamically by JavaScript -->
-            </div>
-          </div>
-
-          <div class="sidebar-section">
             <h3>File Browser</h3>
             <div id="file-browser">
               <div id="file-path-bar">
@@ -186,6 +177,12 @@
               </div>
               <div id="file-list"></div>
             </div>
+          </div>
+
+          <div class="sidebar-section">
+            <button id="settings-btn" class="sidebar-btn">
+              <span class="sidebar-btn-icon">⚙</span> Settings
+            </button>
           </div>
         </div>
         <div id="sidebar-overlay" class="hidden"></div>
@@ -777,14 +774,14 @@
         <div id="messages">
           <div id="welcome-message" class="welcome">
             <h2>Welcome to Claude Web</h2>
-            <p>Send a message or use Quick Actions from the menu.</p>
+            <p>Send a message or use Quick Actions below the chat.</p>
             <div class="welcome-tips">
               <p><strong>Tips:</strong></p>
               <ul>
-                <li>Tap ☰ for quick actions and file browser</li>
+                <li>Tap ⋮ in header for tools menu</li>
+                <li>Tap ☰ for menu and file browser</li>
                 <li>Tap the mic button for voice input</li>
                 <li>Long-press code blocks to copy</li>
-                <li>Swipe right to open menu</li>
               </ul>
             </div>
           </div>

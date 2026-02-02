@@ -499,6 +499,46 @@ io.on("connection", (socket) => {
       return;
     }
 
+    // Build enhanced prompt with active project context
+    let enhancedPrompt = prompt;
+    const activeProject = getActiveProject();
+    if (activeProject) {
+      // Get pending and in-progress tasks for the active project
+      const pendingTasks = listTasks(activeProject.id, { status: "pending" });
+      const inProgressTasks = listTasks(activeProject.id, {
+        status: "in_progress",
+      });
+
+      if (pendingTasks.length > 0 || inProgressTasks.length > 0) {
+        let taskContext = `<project-tasks project="${activeProject.name}">\n`;
+
+        if (inProgressTasks.length > 0) {
+          taskContext += `In Progress:\n`;
+          for (const task of inProgressTasks) {
+            taskContext += `- [${task.priority.toUpperCase()}] ${task.title}`;
+            if (task.description) taskContext += `: ${task.description}`;
+            taskContext += "\n";
+          }
+        }
+
+        if (pendingTasks.length > 0) {
+          taskContext += `Pending (${pendingTasks.length}):\n`;
+          // Show up to 10 pending tasks to avoid overwhelming context
+          for (const task of pendingTasks.slice(0, 10)) {
+            taskContext += `- [${task.priority.toUpperCase()}] ${task.title}`;
+            if (task.description) taskContext += `: ${task.description}`;
+            taskContext += "\n";
+          }
+          if (pendingTasks.length > 10) {
+            taskContext += `... and ${pendingTasks.length - 10} more pending tasks\n`;
+          }
+        }
+
+        taskContext += `</project-tasks>\n\n`;
+        enhancedPrompt = taskContext + prompt;
+      }
+    }
+
     const imageInfo =
       imagePaths.length > 0 ? ` +${imagePaths.length} images` : "";
     console.log(
@@ -527,7 +567,7 @@ io.on("connection", (socket) => {
       return new Promise((resolve) => {
         runClaudeCommand(
           sessionId,
-          prompt || "What do you see in this image?",
+          enhancedPrompt || "What do you see in this image?",
           imagePaths,
           (chunk) => {
             hasReceivedData = true;
