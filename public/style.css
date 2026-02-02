@@ -720,9 +720,10 @@ header {
   background: var(--tool-bg);
   border-radius: 12px;
   border-left: 3px solid var(--warning);
-  overflow: hidden;
+  overflow: visible;
   align-self: flex-start;
   max-width: 90%;
+  min-height: fit-content;
 }
 
 .tool-container-header {
