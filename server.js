@@ -771,6 +771,7 @@ io.on("connection", (socket) => {
   socket.on("save-conversation", async (data) => {
     try {
       const { id, title, messages, tokens, workingDir } = data;
+      const isNew = !id;
       // Generate safe ID if not provided, validate if provided
       const safeId = id ? (isValidId(id) ? id : null) : Date.now().toString();
       if (!safeId) {
@@ -789,6 +790,19 @@ io.on("connection", (socket) => {
 
       const filePath = join(HISTORY_DIR, `${conversation.id}.json`);
       await writeFile(filePath, JSON.stringify(conversation, null, 2));
+
+      // Auto-link new conversations to active project
+      if (isNew) {
+        try {
+          const activeId = getActiveProjectId();
+          if (activeId) {
+            linkConversation(safeId, activeId);
+          }
+        } catch (e) {
+          console.error("Failed to auto-link conversation:", e.message);
+        }
+      }
+
       socket.emit("conversation-saved", {
         id: conversation.id,
         title: conversation.title,
