@@ -49,6 +49,7 @@ import {
   linkConversation,
   unlinkConversation,
   getConversationLink,
+  getAllConversationLinks,
   listConversationLinks,
   moveConversationToFolder,
 } from "./database.js";
@@ -823,9 +824,13 @@ io.on("connection", (socket) => {
       conversations.sort(
         (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt),
       );
-      socket.emit("conversations-list", { conversations });
+
+      // Include all conversation links
+      const links = getAllConversationLinks();
+
+      socket.emit("conversations-list", { conversations, links });
     } catch (err) {
-      socket.emit("conversations-list", { conversations: [] });
+      socket.emit("conversations-list", { conversations: [], links: [] });
     }
   });
 

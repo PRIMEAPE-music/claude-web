@@ -80,6 +80,11 @@ let uploadedImagePaths = []; // Paths returned from server after upload
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024; // 10MB per image
 const MAX_IMAGES_PER_MESSAGE = 5;
 
+// Agent tracking state
+let activeAgents = new Map(); // id -> agent info
+let completedAgents = []; // Keep last few completed agents for display
+const MAX_COMPLETED_AGENTS = 10;
+
 // Settings
 const settings = {
   theme: localStorage.getItem("theme") || "dark",
@@ -314,8 +319,10 @@ function connect(token) {
     // Setup memory socket listeners immediately on connect
     setupMemorySocketListeners();
 
-    // Load active project on connect
+    // Setup project socket listeners and load projects for history filter
+    setupProjectSocketListeners();
     loadActiveProject();
+    loadProjects();
 
     // Note: Push subscription and visibility are sent AFTER session is established
     // (in session-started and session-restored handlers) to ensure sessionId is set
@@ -343,6 +350,7 @@ function connect(token) {
       if (progress) progress.remove();
     }
     isStreaming = false;
+    document.body.classList.remove("is-streaming");
     updateActionsBarState();
     currentResponse = null;
 
@@ -441,23 +449,43 @@ function connect(token) {
         currentResponse.dataset.raw =
           (currentResponse.dataset.raw || "") + chunk.content;
       } else if (chunk.type === "tool_start" && settings.showTools) {
-        addToolToContainer(
-          chunk.name,
-          JSON.stringify(chunk.input, null, 2),
-          chunk.id,
-        );
+        // Use embedded terminal for Bash in buffered replay
+        if (chunk.name === "Bash") {
+          const command = chunk.input?.command || JSON.stringify(chunk.input);
+          const terminal = createEmbeddedTerminal(command, chunk.id);
+          const container = getOrCreateToolContainer();
+          const body = container.querySelector(".tool-container-body");
+          body.appendChild(terminal);
+          toolCount++;
+          updateToolContainerHeader();
+        } else {
+          addToolToContainer(
+            chunk.name,
+            JSON.stringify(chunk.input, null, 2),
+            chunk.id,
+          );
+        }
       } else if (
         chunk.type === "tool_result" &&
         settings.showTools &&
         currentToolContainer
       ) {
-        const toolItem = currentToolContainer.querySelector(
-          `.tool-item[data-tool-id="${chunk.id}"]`,
+        // Check for embedded terminal first
+        const terminal = currentToolContainer.querySelector(
+          `.embedded-terminal[data-tool-id="${chunk.id}"]`,
         );
-        if (toolItem) {
-          const content = toolItem.querySelector(".tool-content");
-          if (content && chunk.output) {
-            content.textContent = chunk.output;
+        if (terminal) {
+          updateTerminalOutput(terminal, chunk.output || "", chunk.isError);
+          completeTerminal(terminal, chunk.isError ? 1 : 0, chunk.duration);
+        } else {
+          const toolItem = currentToolContainer.querySelector(
+            `.tool-item[data-tool-id="${chunk.id}"]`,
+          );
+          if (toolItem) {
+            const content = toolItem.querySelector(".tool-content");
+            if (content && chunk.output) {
+              content.textContent = chunk.output;
+            }
           }
         }
       } else if (chunk.type === "stats") {
@@ -467,8 +495,20 @@ function connect(token) {
         updateSessionTokenDisplay();
         // Store stats for adding badge after render
         currentResponseStats = { usage, duration: chunk.duration };
+      } else if (chunk.type === "agent_spawned") {
+        activeAgents.set(chunk.agent.id, chunk.agent);
+      } else if (chunk.type === "agent_completed") {
+        activeAgents.delete(chunk.agent.id);
+        completedAgents.unshift(chunk.agent);
+        if (completedAgents.length > MAX_COMPLETED_AGENTS) {
+          completedAgents.pop();
+        }
       }
     }
+
+    // Update agent UI after processing buffered chunks
+    updateAgentPill();
+    updateAgentSheet();
 
     // Render the markdown
     if (currentResponse) {
@@ -551,6 +591,7 @@ function connect(token) {
 
   socket.on("response-start", () => {
     isStreaming = true;
+    document.body.classList.add("is-streaming");
     updateActionsBarState();
     pendingText = "";
     clearTimeout(renderTimeout);
@@ -624,51 +665,79 @@ function connect(token) {
       // Update progress indicator with tool info
       updateProgressStatus(`Using ${chunk.name}...`);
       if (settings.showTools) {
-        const inputStr =
-          typeof chunk.input === "string"
-            ? chunk.input
-            : JSON.stringify(chunk.input, null, 2);
-        addToolToContainer(chunk.name, inputStr || "(executing...)", chunk.id);
+        // Special handling for Bash tool - use embedded terminal
+        if (chunk.name === "Bash") {
+          const command = chunk.input?.command || JSON.stringify(chunk.input);
+          const terminal = createEmbeddedTerminal(command, chunk.id);
+          const container = getOrCreateToolContainer();
+          const body = container.querySelector(".tool-container-body");
+          body.appendChild(terminal);
+          toolCount++;
+          updateToolContainerHeader();
+        } else {
+          // Regular tool display
+          const inputStr =
+            typeof chunk.input === "string"
+              ? chunk.input
+              : JSON.stringify(chunk.input, null, 2);
+          addToolToContainer(
+            chunk.name,
+            inputStr || "(executing...)",
+            chunk.id,
+          );
+        }
         if (settings.autoScroll) scrollToBottom();
       }
     } else if (chunk.type === "tool_result") {
       // Tool finished - update progress and tool message
       updateProgressStatus("Thinking...");
       if (settings.showTools && currentToolContainer) {
-        // Find the tool item by ID within the container and update it
-        const toolItem = currentToolContainer.querySelector(
-          `.tool-item[data-tool-id="${chunk.id}"]`,
+        // Check if this is an embedded terminal (Bash)
+        const terminal = currentToolContainer.querySelector(
+          `.embedded-terminal[data-tool-id="${chunk.id}"]`,
         );
-        if (toolItem) {
-          const content = toolItem.querySelector(".tool-content");
-          const header = toolItem.querySelector(
-            ".tool-item-header span:first-child",
+
+        if (terminal) {
+          // Update embedded terminal
+          updateTerminalOutput(terminal, chunk.output || "", chunk.isError);
+          completeTerminal(terminal, chunk.isError ? 1 : 0, chunk.duration);
+        } else {
+          // Regular tool result handling
+          const toolItem = currentToolContainer.querySelector(
+            `.tool-item[data-tool-id="${chunk.id}"]`,
           );
-          if (content && chunk.output) {
-            // Check if output contains an image
-            const imageDataUrl = renderImageContent(chunk.output);
-            if (imageDataUrl) {
-              // Render as image
-              content.innerHTML = "";
-              const imgWrapper = document.createElement("div");
-              imgWrapper.className = "tool-image-result";
-              const img = document.createElement("img");
-              img.src = imageDataUrl;
-              img.alt = "Tool output image";
-              img.onclick = () => openLightbox(imageDataUrl, "screenshot.png");
-              imgWrapper.appendChild(img);
-              content.appendChild(imgWrapper);
-              // Auto-expand tool items with images
-              toolItem.classList.add("expanded");
-              header.querySelector("span:last-child").textContent = "▲";
-            } else {
-              content.textContent = chunk.output;
+          if (toolItem) {
+            const content = toolItem.querySelector(".tool-content");
+            const header = toolItem.querySelector(
+              ".tool-item-header span:first-child",
+            );
+            if (content && chunk.output) {
+              // Check if output contains an image
+              const imageDataUrl = renderImageContent(chunk.output);
+              if (imageDataUrl) {
+                // Render as image
+                content.innerHTML = "";
+                const imgWrapper = document.createElement("div");
+                imgWrapper.className = "tool-image-result";
+                const img = document.createElement("img");
+                img.src = imageDataUrl;
+                img.alt = "Tool output image";
+                img.onclick = () =>
+                  openLightbox(imageDataUrl, "screenshot.png");
+                imgWrapper.appendChild(img);
+                content.appendChild(imgWrapper);
+                // Auto-expand tool items with images
+                toolItem.classList.add("expanded");
+                header.querySelector("span:last-child").textContent = "▲";
+              } else {
+                content.textContent = chunk.output;
+              }
             }
-          }
-          if (header) {
-            header.innerHTML = chunk.isError
-              ? "❌ " + header.textContent.replace("🔧 ", "")
-              : "✅ " + header.textContent.replace("🔧 ", "");
+            if (header) {
+              header.innerHTML = chunk.isError
+                ? "❌ " + header.textContent.replace("🔧 ", "")
+                : "✅ " + header.textContent.replace("🔧 ", "");
+            }
           }
         }
         // Update container header with completed count
@@ -693,6 +762,20 @@ function connect(token) {
       if (progress) progress.remove();
       addMessage(chunk.content, "error");
       if (settings.autoScroll) scrollToBottom();
+    } else if (chunk.type === "agent_spawned") {
+      // Track new agent
+      activeAgents.set(chunk.agent.id, chunk.agent);
+      updateAgentPill();
+      updateAgentSheet();
+    } else if (chunk.type === "agent_completed") {
+      // Move from active to completed
+      activeAgents.delete(chunk.agent.id);
+      completedAgents.unshift(chunk.agent);
+      if (completedAgents.length > MAX_COMPLETED_AGENTS) {
+        completedAgents.pop();
+      }
+      updateAgentPill();
+      updateAgentSheet();
     }
   });
 
@@ -752,6 +835,7 @@ function connect(token) {
     }
 
     isStreaming = false;
+    document.body.classList.remove("is-streaming");
     updateActionsBarState();
     currentResponse = null;
     currentResponseStats = null; // Reset stats for next response
@@ -762,6 +846,18 @@ function connect(token) {
     document
       .querySelectorAll(".progress-indicator")
       .forEach((el) => el.remove());
+
+    // Clear active agents (response complete, move any remaining to completed)
+    for (const [id, agent] of activeAgents) {
+      agent.status = "unknown";
+      completedAgents.unshift(agent);
+    }
+    activeAgents.clear();
+    if (completedAgents.length > MAX_COMPLETED_AGENTS) {
+      completedAgents = completedAgents.slice(0, MAX_COMPLETED_AGENTS);
+    }
+    updateAgentPill();
+    updateAgentSheet();
 
     // Play sound and vibrate ONLY if page is visible AND was visible during response
     // Skip if page just became visible (within 1 second) - this handles queued events
@@ -827,6 +923,7 @@ function connect(token) {
     clearRetryCountdown(); // Clean up any active countdown
     addMessage(`Error: ${data.message}`, "error");
     isStreaming = false;
+    document.body.classList.remove("is-streaming");
     updateActionsBarState();
     sendBtn.classList.remove("hidden");
     stopBtn.classList.add("hidden");
@@ -858,6 +955,7 @@ function connect(token) {
       renderMarkdown(currentResponse);
     }
     isStreaming = false;
+    document.body.classList.remove("is-streaming");
     updateActionsBarState();
     currentResponse = null;
     sendBtn.classList.remove("hidden");
@@ -871,6 +969,18 @@ function connect(token) {
   // Conversation history handlers
   socket.on("conversations-list", (data) => {
     conversationsCache = data.conversations || [];
+
+    // Populate conversation links cache
+    if (data.links) {
+      conversationLinksCache = {};
+      for (const link of data.links) {
+        conversationLinksCache[link.conversationId] = {
+          projectId: link.projectId,
+          folderId: link.folderId,
+        };
+      }
+    }
+
     renderConversationList(conversationsCache);
   });
 
@@ -1006,6 +1116,14 @@ function addMessage(content, type, images = []) {
     div.dataset.raw = content;
     renderMarkdown(div);
   } else if (type === "user") {
+    // Remove last-message class from previous user message
+    const prevLastUserMsg = messages.querySelector(
+      ".message.user.last-message",
+    );
+    if (prevLastUserMsg) {
+      prevLastUserMsg.classList.remove("last-message");
+    }
+
     // Add images if present
     if (images && images.length > 0) {
       const imagesDiv = document.createElement("div");
@@ -1019,6 +1137,7 @@ function addMessage(content, type, images = []) {
       });
       div.appendChild(imagesDiv);
     }
+
     // Add text content
     if (content) {
       const textDiv = document.createElement("div");
@@ -1026,6 +1145,56 @@ function addMessage(content, type, images = []) {
       textDiv.textContent = content;
       div.appendChild(textDiv);
     }
+
+    // Add edit container (hidden by default)
+    const editContainer = document.createElement("div");
+    editContainer.className = "message-edit-container";
+    editContainer.innerHTML = `
+      <textarea class="message-edit-textarea"></textarea>
+      <div class="message-edit-buttons">
+        <button class="message-edit-btn cancel">Cancel</button>
+        <button class="message-edit-btn save">Save & Send</button>
+      </div>
+    `;
+    div.appendChild(editContainer);
+
+    // Add action buttons
+    const actionsDiv = document.createElement("div");
+    actionsDiv.className = "message-actions";
+    actionsDiv.innerHTML = `
+      <button class="message-action-btn edit-btn" title="Edit message">✏️ Edit</button>
+      <button class="message-action-btn regen-btn" title="Regenerate response">🔄 Regenerate</button>
+    `;
+    div.appendChild(actionsDiv);
+
+    // Mark as last user message
+    div.classList.add("last-message");
+
+    // Store content for editing
+    div.dataset.content = content;
+    div.dataset.images = JSON.stringify(images);
+
+    // Attach event listeners
+    const editBtn = actionsDiv.querySelector(".edit-btn");
+    const regenBtn = actionsDiv.querySelector(".regen-btn");
+    const cancelBtn = editContainer.querySelector(".cancel");
+    const saveBtn = editContainer.querySelector(".save");
+    const textarea = editContainer.querySelector("textarea");
+
+    editBtn.onclick = () => startEditMessage(div, textarea);
+    regenBtn.onclick = () => regenerateMessage(div);
+    cancelBtn.onclick = () => cancelEditMessage(div);
+    saveBtn.onclick = () => saveEditMessage(div, textarea);
+
+    // Handle Enter to save, Escape to cancel
+    textarea.onkeydown = (e) => {
+      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        saveEditMessage(div, textarea);
+      } else if (e.key === "Escape") {
+        cancelEditMessage(div);
+      }
+    };
   } else {
     div.textContent = content;
   }
@@ -1034,6 +1203,142 @@ function addMessage(content, type, images = []) {
   if (settings.autoScroll) scrollToBottom();
   return div;
 }
+
+// ===== Message Edit & Regenerate Functions =====
+
+function startEditMessage(msgDiv, textarea) {
+  const content = msgDiv.dataset.content || "";
+  textarea.value = content;
+  msgDiv.classList.add("editing");
+  textarea.focus();
+  // Auto-resize textarea to content
+  textarea.style.height = "auto";
+  textarea.style.height = Math.min(textarea.scrollHeight, 200) + "px";
+}
+
+function cancelEditMessage(msgDiv) {
+  msgDiv.classList.remove("editing");
+}
+
+function saveEditMessage(msgDiv, textarea) {
+  const newContent = textarea.value.trim();
+  if (!newContent) {
+    showToast("Message cannot be empty");
+    return;
+  }
+
+  const originalContent = msgDiv.dataset.content;
+  if (newContent === originalContent) {
+    // No changes, just cancel edit mode
+    cancelEditMessage(msgDiv);
+    return;
+  }
+
+  // Remove edit mode
+  msgDiv.classList.remove("editing");
+
+  // Remove the last assistant response (and any tool containers after this message)
+  removeResponsesAfterMessage(msgDiv);
+
+  // Update the message content
+  const textDiv = msgDiv.querySelector(".message-text");
+  if (textDiv) {
+    textDiv.textContent = newContent;
+  }
+  msgDiv.dataset.content = newContent;
+
+  // Update conversation history - replace last user message
+  const lastUserMsgIndex = findLastUserMessageIndex();
+  if (lastUserMsgIndex >= 0) {
+    conversationMessages[lastUserMsgIndex].content = newContent;
+    conversationMessages[lastUserMsgIndex].timestamp = Date.now();
+  }
+
+  // Remove last assistant message from history
+  removeLastAssistantFromHistory();
+
+  // Send the edited message
+  socket.emit("message", { prompt: newContent, imagePaths: [] });
+  autoSaveConversation();
+
+  // Update UI state
+  isStreaming = true;
+  document.body.classList.add("is-streaming");
+  sendBtn.classList.add("hidden");
+  stopBtn.classList.remove("hidden");
+  updateActionsBarState();
+}
+
+function regenerateMessage(msgDiv) {
+  const content = msgDiv.dataset.content || "";
+  if (!content) {
+    showToast("No message to regenerate");
+    return;
+  }
+
+  // Check for images - warn user they won't be included
+  const images = JSON.parse(msgDiv.dataset.images || "[]");
+  if (images.length > 0) {
+    showToast("Note: Images won't be included in regeneration");
+  }
+
+  // Remove the last assistant response
+  removeResponsesAfterMessage(msgDiv);
+
+  // Remove last assistant message from history
+  removeLastAssistantFromHistory();
+
+  // Resend the same message (images can't be re-sent without re-upload)
+  socket.emit("message", { prompt: content, imagePaths: [] });
+  autoSaveConversation();
+
+  // Update UI state
+  isStreaming = true;
+  document.body.classList.add("is-streaming");
+  sendBtn.classList.add("hidden");
+  stopBtn.classList.remove("hidden");
+  updateActionsBarState();
+
+  if (settings.vibrateEnabled && navigator.vibrate) {
+    navigator.vibrate(10);
+  }
+}
+
+function removeResponsesAfterMessage(msgDiv) {
+  // Remove all siblings after the user message (assistant response, tool containers)
+  let next = msgDiv.nextElementSibling;
+  while (next) {
+    const toRemove = next;
+    next = next.nextElementSibling;
+    toRemove.remove();
+  }
+
+  // Reset tool container state
+  currentToolContainer = null;
+  toolCount = 0;
+  currentResponse = null;
+}
+
+function findLastUserMessageIndex() {
+  for (let i = conversationMessages.length - 1; i >= 0; i--) {
+    if (conversationMessages[i].type === "user") {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function removeLastAssistantFromHistory() {
+  // Remove trailing assistant messages from history
+  while (
+    conversationMessages.length > 0 &&
+    conversationMessages[conversationMessages.length - 1].type === "assistant"
+  ) {
+    conversationMessages.pop();
+  }
+}
+
+// ===== End Message Edit & Regenerate Functions =====
 
 // Create or get the tool container for the current response
 function getOrCreateToolContainer() {
@@ -1132,6 +1437,117 @@ function addToolToContainer(name, input, toolId) {
 function addToolMessage(name, input, toolId) {
   return addToolToContainer(name, input, toolId);
 }
+
+// ===== Embedded Terminal Functions =====
+
+// Initialize ANSI parser
+const ansiUp = new AnsiUp();
+ansiUp.use_classes = true;
+
+// Convert ANSI codes to HTML
+function ansiToHtml(text) {
+  if (!text) return "";
+  try {
+    return ansiUp.ansi_to_html(text);
+  } catch (e) {
+    console.error("ANSI parsing failed:", e);
+    // Fallback to escaped plain text
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML;
+  }
+}
+
+// Create embedded terminal for Bash commands
+function createEmbeddedTerminal(command, toolId) {
+  const terminal = document.createElement("div");
+  terminal.className = "embedded-terminal";
+  terminal.dataset.toolId = toolId;
+
+  terminal.innerHTML = `
+    <div class="term-header">
+      <div class="term-header-dots">
+        <span class="term-header-dot red"></span>
+        <span class="term-header-dot yellow"></span>
+        <span class="term-header-dot green"></span>
+      </div>
+      <span class="term-header-title">Terminal</span>
+    </div>
+    <div class="term-command">
+      <span class="term-prompt">$</span>
+      <span class="term-cmd">${escapeHtml(command)}</span>
+    </div>
+    <pre class="term-output streaming"></pre>
+    <div class="term-footer running">
+      <span class="term-footer-status">
+        <span class="term-spinner"></span>
+        <span>Running...</span>
+      </span>
+      <span class="term-footer-time"></span>
+    </div>
+  `;
+
+  return terminal;
+}
+
+// Update terminal with output
+function updateTerminalOutput(terminal, output, isError = false) {
+  const outputEl = terminal.querySelector(".term-output");
+  if (outputEl) {
+    // Convert ANSI codes to HTML with color classes
+    outputEl.innerHTML = ansiToHtml(output);
+    outputEl.classList.remove("streaming");
+
+    // Auto-collapse if output is very long (>20 lines)
+    const lineCount = (output.match(/\n/g) || []).length;
+    if (lineCount > 20) {
+      outputEl.classList.add("collapsed");
+      addTerminalExpandButton(terminal, outputEl);
+    }
+  }
+}
+
+// Mark terminal as complete
+function completeTerminal(terminal, exitCode, durationMs) {
+  const footer = terminal.querySelector(".term-footer");
+  if (footer) {
+    const isSuccess = exitCode === 0;
+    footer.className = `term-footer ${isSuccess ? "success" : "error"}`;
+    footer.innerHTML = `
+      <span class="term-footer-status">
+        ${isSuccess ? "✓" : "✗"} Exit ${exitCode}
+      </span>
+      <span class="term-footer-time">${formatTerminalDuration(durationMs)}</span>
+    `;
+  }
+}
+
+// Add expand/collapse button for long output
+function addTerminalExpandButton(terminal, outputEl) {
+  const footer = terminal.querySelector(".term-footer");
+  // Check if button already exists
+  if (footer.querySelector(".term-expand-btn")) return;
+
+  const btn = document.createElement("button");
+  btn.className = "term-expand-btn";
+  btn.textContent = "Show more";
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const isCollapsed = outputEl.classList.toggle("collapsed");
+    btn.textContent = isCollapsed ? "Show more" : "Show less";
+  };
+  footer.insertBefore(btn, footer.firstChild);
+}
+
+// Format duration nicely
+function formatTerminalDuration(ms) {
+  if (!ms) return "";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
+}
+
+// ===== End Embedded Terminal Functions =====
 
 function escapeHtml(str) {
   const div = document.createElement("div");
@@ -1934,6 +2350,136 @@ if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
   };
 } else {
   voiceBtn.style.display = "none";
+}
+
+// Agent Pill and Bottom Sheet UI
+function updateAgentPill() {
+  let pill = document.getElementById("agent-pill");
+  const runningCount = activeAgents.size;
+  const completedCount = completedAgents.length;
+  const totalRecent = runningCount + completedCount;
+
+  // Hide pill if no agents
+  if (totalRecent === 0) {
+    if (pill) pill.classList.add("hidden");
+    return;
+  }
+
+  // Create pill if doesn't exist
+  if (!pill) {
+    pill = document.createElement("div");
+    pill.id = "agent-pill";
+    pill.className = "agent-pill";
+    pill.onclick = toggleAgentSheet;
+    document.getElementById("chat-screen").appendChild(pill);
+  }
+
+  // Update pill content
+  pill.classList.remove("hidden");
+  if (runningCount > 0) {
+    pill.innerHTML = `<span class="agent-pill-spinner"></span><span class="agent-pill-count">${runningCount}</span>`;
+    pill.classList.add("running");
+  } else {
+    pill.innerHTML = `<span class="agent-pill-icon">✓</span><span class="agent-pill-count">${completedCount}</span>`;
+    pill.classList.remove("running");
+  }
+}
+
+function toggleAgentSheet() {
+  const sheet = document.getElementById("agent-sheet");
+  if (sheet) {
+    sheet.classList.toggle("open");
+  }
+}
+
+function closeAgentSheet() {
+  const sheet = document.getElementById("agent-sheet");
+  if (sheet) {
+    sheet.classList.remove("open");
+  }
+}
+
+function updateAgentSheet() {
+  let sheet = document.getElementById("agent-sheet");
+
+  // Create sheet if doesn't exist
+  if (!sheet) {
+    sheet = document.createElement("div");
+    sheet.id = "agent-sheet";
+    sheet.className = "agent-sheet";
+    sheet.innerHTML = `
+      <div class="agent-sheet-overlay" onclick="closeAgentSheet()"></div>
+      <div class="agent-sheet-content">
+        <div class="agent-sheet-handle"></div>
+        <h3 class="agent-sheet-title">Agents</h3>
+        <div class="agent-sheet-list"></div>
+      </div>
+    `;
+    document.getElementById("chat-screen").appendChild(sheet);
+  }
+
+  const list = sheet.querySelector(".agent-sheet-list");
+  if (!list) return;
+
+  // Build agent list HTML
+  let html = "";
+
+  // Active agents first
+  for (const [id, agent] of activeAgents) {
+    html += renderAgentCard(agent, true);
+  }
+
+  // Then completed agents
+  for (const agent of completedAgents) {
+    html += renderAgentCard(agent, false);
+  }
+
+  if (!html) {
+    html = '<div class="agent-empty">No recent agent activity</div>';
+  }
+
+  list.innerHTML = html;
+}
+
+function renderAgentCard(agent, isActive) {
+  const statusIcon = isActive
+    ? '<span class="agent-status-spinner"></span>'
+    : agent.status === "completed"
+      ? '<span class="agent-status-icon completed">✓</span>'
+      : agent.status === "error"
+        ? '<span class="agent-status-icon error">✗</span>'
+        : '<span class="agent-status-icon unknown">?</span>';
+
+  const duration = agent.duration
+    ? `<span class="agent-duration">${(agent.duration / 1000).toFixed(1)}s</span>`
+    : "";
+
+  const typeLabel = formatAgentType(agent.type);
+
+  return `
+    <div class="agent-card ${isActive ? "active" : agent.status}">
+      <div class="agent-card-header">
+        ${statusIcon}
+        <span class="agent-type">${typeLabel}</span>
+        ${duration}
+      </div>
+      <div class="agent-card-desc">${escapeHtml(agent.description || "")}</div>
+    </div>
+  `;
+}
+
+function formatAgentType(type) {
+  // Convert kebab-case to Title Case
+  return type
+    .split("-")
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 // Toast notification

@@ -38,6 +38,8 @@ export function createSession(workingDir = process.env.HOME, model = "opus") {
     responseBuffer: [],
     isBuffering: false,
     bufferComplete: false,
+    // Agent tracking
+    activeAgents: new Map(), // tool_use_id -> agent info
   });
   return sessionId;
 }
@@ -68,8 +70,8 @@ function shellEscape(str) {
   return `'${str.replace(/'/g, "'\\''")}'`;
 }
 
-// Truncate long tool output for display
-function truncateOutput(str, maxLen = 500) {
+// Truncate long tool output for display (increased limit for embedded terminal)
+function truncateOutput(str, maxLen = 50000) {
   if (!str || typeof str !== "string") return str;
   if (str.length <= maxLen) return str;
   return str.substring(0, maxLen) + `\n... (${str.length - maxLen} more chars)`;
@@ -188,6 +190,24 @@ export async function runClaudeCommand(
                   id: block.id,
                   input: block.input,
                 });
+                // Detect agent spawns (Task tool with subagent_type)
+                if (block.name === "Task" && block.input?.subagent_type) {
+                  const agentInfo = {
+                    id: block.id,
+                    type: block.input.subagent_type,
+                    description:
+                      block.input.description || block.input.subagent_type,
+                    prompt: block.input.prompt,
+                    status: "running",
+                    startedAt: Date.now(),
+                  };
+                  session.activeAgents.set(block.id, agentInfo);
+                  bufferAndSend({
+                    type: "agent_spawned",
+                    agent: agentInfo,
+                    activeCount: session.activeAgents.size,
+                  });
+                }
               }
             }
           }
@@ -209,6 +229,21 @@ export async function runClaudeCommand(
                   output: truncateOutput(block.content),
                   isError: block.is_error,
                 });
+                // Check if this completes an agent
+                const agent = session.activeAgents.get(block.tool_use_id);
+                if (agent) {
+                  agent.status = block.is_error ? "error" : "completed";
+                  agent.completedAt = Date.now();
+                  agent.duration = agent.completedAt - agent.startedAt;
+                  agent.result = truncateOutput(block.content, 500); // Short preview
+                  agent.isError = block.is_error;
+                  session.activeAgents.delete(block.tool_use_id);
+                  bufferAndSend({
+                    type: "agent_completed",
+                    agent: agent,
+                    activeCount: session.activeAgents.size,
+                  });
+                }
               }
             }
           }
@@ -386,6 +421,7 @@ export async function loadPersistedSessions() {
           process: null,
           history: data.history || [],
           claudeSessionId: data.claudeSessionId,
+          activeAgents: new Map(),
         });
         loaded++;
       } catch (e) {

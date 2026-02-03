@@ -469,6 +469,18 @@ export function listConversationLinks(projectId, folderId = null) {
   }));
 }
 
+export function getAllConversationLinks() {
+  const db = getDb();
+  const stmt = db.prepare("SELECT * FROM conversation_links");
+  const rows = stmt.all();
+  return rows.map((row) => ({
+    conversationId: row.conversation_id,
+    projectId: row.project_id,
+    folderId: row.folder_id,
+    linkedAt: row.linked_at,
+  }));
+}
+
 export function unlinkConversation(conversationId) {
   const db = getDb();
   const stmt = db.prepare(
