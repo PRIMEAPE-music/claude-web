@@ -44,6 +44,25 @@ self.addEventListener("push", async (event) => {
     }
   }
 
+  // Try to relay to a client for Capacitor native notification (custom sound)
+  // If a client handles it, skip the web notification to avoid duplicates
+  const relayToClient = async () => {
+    const clientList = await clients.matchAll({
+      type: "window",
+      includeUncontrolled: true,
+    });
+    for (const client of clientList) {
+      client.postMessage({
+        type: "PUSH_RECEIVED",
+        title: data.title || "Claude Web",
+        body: data.body || "Response complete",
+        sessionId: data.sessionId,
+      });
+    }
+    // Return true if we found any client to relay to
+    return clientList.length > 0;
+  };
+
   const options = {
     body: data.body || "Response complete",
     icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%231a1a2e' width='100' height='100' rx='20'/><text x='50' y='65' text-anchor='middle' font-size='50' fill='%23e94560'>C</text></svg>",
@@ -53,6 +72,7 @@ self.addEventListener("push", async (event) => {
     tag: "claude-response",
     renotify: true,
     requireInteraction: false,
+    silent: false,
     data: {
       sessionId: data.sessionId,
       timestamp: Date.now(),
@@ -70,7 +90,21 @@ self.addEventListener("push", async (event) => {
   }
 
   event.waitUntil(
-    self.registration.showNotification(data.title || "Claude Web", options),
+    (async () => {
+      // Try to relay to client first (Capacitor handles sound via native channel)
+      const relayed = await relayToClient();
+      if (relayed) {
+        // Client is alive — it will fire a Capacitor local notification with custom sound.
+        // Silence the web notification so we don't get two sounds.
+        options.silent = true;
+        delete options.vibrate;
+      }
+      // Always show the web notification for the visual notification shade entry
+      await self.registration.showNotification(
+        data.title || "Claude Web",
+        options,
+      );
+    })(),
   );
 });
 

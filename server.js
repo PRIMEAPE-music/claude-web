@@ -804,6 +804,10 @@ io.on("connection", (socket) => {
               subscription.keys?.p256dh &&
               subscription.keys?.auth;
 
+            console.log(
+              `[${sessionId}] Push check: visible=${isVisible}, hasSubscription=${!!subscription}, validSub=${isValidSubscription}, vapid=${!!process.env.VAPID_PUBLIC_KEY}`,
+            );
+
             if (
               !isVisible &&
               isValidSubscription &&

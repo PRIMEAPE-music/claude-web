@@ -103,6 +103,84 @@ let swRegistration = null;
 let pushSubscription = null;
 let isPageVisible = !document.hidden;
 
+// Capacitor native notification support
+const isCapacitor = !!window.Capacitor?.isNativePlatform?.();
+let capacitorNotificationsReady = false;
+let capacitorNotificationId = 1;
+let capacitorSetupPromise = null;
+let lastCapacitorNotificationTime = 0;
+
+async function setupCapacitorNotifications() {
+  if (!isCapacitor) return;
+  try {
+    const LocalNotifications = window.Capacitor?.Plugins?.LocalNotifications;
+    if (!LocalNotifications) return;
+
+    // Request permission (Android 13+ requires POST_NOTIFICATIONS)
+    const permResult = await LocalNotifications.requestPermissions();
+    if (permResult.display !== "granted") {
+      console.log("[Capacitor] Notification permission denied");
+      return;
+    }
+
+    // Create notification channel with custom sound
+    await LocalNotifications.createChannel({
+      id: "claude-response",
+      name: "Claude Responses",
+      description: "Notification when Claude finishes a response",
+      importance: 4, // HIGH
+      visibility: 1, // PUBLIC
+      sound: "notification.mp3",
+      vibration: true,
+      lights: true,
+      lightColor: "#e94560",
+    });
+
+    // Listen for notification tap to bring app to foreground
+    LocalNotifications.addListener("localNotificationActionPerformed", () => {
+      console.log("[Capacitor] Notification tapped");
+    });
+
+    capacitorNotificationsReady = true;
+    console.log("[Capacitor] Local notifications ready with custom sound");
+  } catch (err) {
+    console.error("[Capacitor] Failed to setup notifications:", err);
+  }
+}
+
+function sanitizeNotificationText(text, maxLen) {
+  if (typeof text !== "string") return "";
+  return text.replace(/[^\x20-\x7E\u00A0-\uFFFF]/g, "").slice(0, maxLen);
+}
+
+async function showCapacitorNotification(title, body) {
+  // Wait for setup if still in progress
+  if (capacitorSetupPromise) await capacitorSetupPromise;
+  if (!capacitorNotificationsReady) return false;
+  try {
+    const LocalNotifications = window.Capacitor?.Plugins?.LocalNotifications;
+    if (!LocalNotifications) return false;
+    await LocalNotifications.schedule({
+      notifications: [
+        {
+          title: sanitizeNotificationText(title, 100) || "Claude Web",
+          body: sanitizeNotificationText(body, 500) || "Response complete",
+          id: capacitorNotificationId++,
+          channelId: "claude-response",
+          sound: "notification.mp3",
+          smallIcon: "ic_stat_icon_config_sample",
+          iconColor: "#e94560",
+        },
+      ],
+    });
+    lastCapacitorNotificationTime = Date.now();
+    return true;
+  } catch (err) {
+    console.error("[Capacitor] Failed to show notification:", err);
+    return false;
+  }
+}
+
 // VAPID public key (must match server)
 const VAPID_PUBLIC_KEY =
   "BAWszWNbFyGFZ8BEHJ0Zn3mojgzgDVP_nG1fwOsfi23ERjFg6uXUmCQ_bPuwth_MlZ9fF4r_9KOwxy5hpyHJ2PA";
@@ -140,6 +218,14 @@ async function setupPushNotifications() {
 
     if (pushSubscription) {
       console.log("Existing push subscription found");
+      // If socket already connected and session established, send subscription now
+      // (fixes race condition where session-started fires before SW is ready)
+      if (socket?.connected && currentSessionId) {
+        socket.emit("push-subscribe", {
+          subscription: pushSubscription.toJSON(),
+        });
+        console.log("Push subscription sent (late registration)");
+      }
     } else {
       console.log("No push subscription - user can enable in settings");
       // Don't auto-request permission - Firefox blocks this without user interaction
@@ -247,15 +333,25 @@ function clearPushNotificationFlag(sessionId) {
 // when hidden would cause double-play issues when user returns to app
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("message", (event) => {
-    // Handle other SW messages if needed in the future
     if (event.data?.type === "NOTIFICATION_FLAG_RESULT") {
       // Handled by wasNotifiedByPush() promise
+    }
+    // Service worker relayed a push event — show native notification with custom sound
+    // Skip if we already fired a Capacitor notification from claude-done (within 5s)
+    if (event.data?.type === "PUSH_RECEIVED" && isCapacitor) {
+      const now = Date.now();
+      if (now - lastCapacitorNotificationTime > 5000) {
+        showCapacitorNotification(event.data.title, event.data.body);
+      }
     }
   });
 }
 
 // Initialize push notifications on page load
 setupPushNotifications();
+
+// Initialize Capacitor native notifications (Android)
+capacitorSetupPromise = setupCapacitorNotifications();
 
 // Apply initial settings
 applySettings();
@@ -892,6 +988,9 @@ function connect(token) {
       if (settings.vibrateEnabled && navigator.vibrate) {
         navigator.vibrate(50);
       }
+    } else if (isCapacitor && settings.pushEnabled) {
+      // App is backgrounded or screen locked — fire native notification with Mario coin sound
+      showCapacitorNotification("Claude Web", "Response complete");
     }
   });
 
