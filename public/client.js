@@ -181,6 +181,37 @@ async function showCapacitorNotification(title, body) {
   }
 }
 
+// Notification polling for Capacitor (WebView has no PushManager)
+// When the app is backgrounded, poll the server for pending notifications
+let notificationPollInterval = null;
+
+function startNotificationPolling() {
+  if (!isCapacitor || notificationPollInterval) return;
+  // Poll every 3 seconds when backgrounded, pause when visible
+  notificationPollInterval = setInterval(async () => {
+    if (isPageVisible || !currentSessionId || !settings.pushEnabled) return;
+    try {
+      const resp = await fetch(`/api/notifications/${currentSessionId}`);
+      const data = await resp.json();
+      if (data.notification) {
+        showCapacitorNotification(
+          data.notification.title,
+          data.notification.body,
+        );
+      }
+    } catch (e) {
+      // Server unreachable — will retry next interval
+    }
+  }, 3000);
+}
+
+function stopNotificationPolling() {
+  if (notificationPollInterval) {
+    clearInterval(notificationPollInterval);
+    notificationPollInterval = null;
+  }
+}
+
 // VAPID public key (must match server)
 const VAPID_PUBLIC_KEY =
   "BAWszWNbFyGFZ8BEHJ0Zn3mojgzgDVP_nG1fwOsfi23ERjFg6uXUmCQ_bPuwth_MlZ9fF4r_9KOwxy5hpyHJ2PA";
@@ -353,6 +384,8 @@ setupPushNotifications();
 // Initialize Capacitor native notifications (Android)
 capacitorSetupPromise = setupCapacitorNotifications();
 
+// Notification polling is started after session is established (see session-started handler)
+
 // Apply initial settings
 applySettings();
 
@@ -487,6 +520,12 @@ function connect(token) {
       });
     }
     socket.emit("visibility-change", { visible: isPageVisible });
+
+    // Start notification polling for Capacitor (WebView has no PushManager)
+    if (isCapacitor && settings.pushEnabled) {
+      startNotificationPolling();
+    }
+
     updateSessionTokenDisplay();
   });
 
@@ -508,6 +547,11 @@ function connect(token) {
       });
     }
     socket.emit("visibility-change", { visible: isPageVisible });
+
+    // Start notification polling for Capacitor (WebView has no PushManager)
+    if (isCapacitor && settings.pushEnabled) {
+      startNotificationPolling();
+    }
 
     // Restore conversation history from saved conversation
     // Note: We load conversation first, THEN check for buffered response
@@ -955,6 +999,8 @@ function connect(token) {
     updateActionsBarState();
     currentResponse = null;
     currentResponseStats = null; // Reset stats for next response
+    sendBtn.disabled = false;
+    sendBtn.textContent = "➤";
     sendBtn.classList.remove("hidden");
     stopBtn.classList.add("hidden");
 
@@ -1044,6 +1090,8 @@ function connect(token) {
     isStreaming = false;
     document.body.classList.remove("is-streaming");
     updateActionsBarState();
+    sendBtn.disabled = false;
+    sendBtn.textContent = "➤";
     sendBtn.classList.remove("hidden");
     stopBtn.classList.add("hidden");
 
@@ -1077,6 +1125,8 @@ function connect(token) {
     document.body.classList.remove("is-streaming");
     updateActionsBarState();
     currentResponse = null;
+    sendBtn.disabled = false;
+    sendBtn.textContent = "➤";
     sendBtn.classList.remove("hidden");
     stopBtn.classList.add("hidden");
   });
@@ -1202,6 +1252,8 @@ async function sendMessage() {
       sendBtn.disabled = true;
       sendBtn.textContent = "⬆";
       imagePaths = await uploadPendingImages();
+      sendBtn.disabled = false;
+      sendBtn.textContent = "➤";
     } catch (err) {
       showToast("Failed to upload images: " + err.message);
       sendBtn.disabled = false;
@@ -2209,34 +2261,63 @@ document.getElementById("push-enabled").onchange = async (e) => {
   settings.pushEnabled = e.target.checked;
   localStorage.setItem("pushEnabled", settings.pushEnabled);
 
-  // Subscribe or unsubscribe from push
-  if (settings.pushEnabled && !pushSubscription) {
-    showToast("Requesting notification permission...");
-    const success = await subscribeToPush();
-    if (success) {
-      showToast("Push notifications enabled");
-      // Send to server immediately
-      if (socket?.connected && pushSubscription) {
-        socket.emit("push-subscribe", {
-          subscription: pushSubscription.toJSON(),
-        });
+  if (settings.pushEnabled) {
+    if (isCapacitor) {
+      // Capacitor: use native local notifications (no PushManager needed)
+      await capacitorSetupPromise;
+      if (capacitorNotificationsReady) {
+        showToast("Push notifications enabled (native)");
+      } else {
+        // Try setup again — permission may have been denied earlier
+        capacitorSetupPromise = setupCapacitorNotifications();
+        await capacitorSetupPromise;
+        if (capacitorNotificationsReady) {
+          showToast("Push notifications enabled (native)");
+        } else {
+          showToast("Notification permission denied");
+          e.target.checked = false;
+          settings.pushEnabled = false;
+          localStorage.setItem("pushEnabled", "false");
+        }
       }
-    } else {
-      showToast("Failed to enable push notifications");
-      e.target.checked = false;
-      settings.pushEnabled = false;
-      localStorage.setItem("pushEnabled", "false");
+      // Start polling for notifications when backgrounded
+      if (settings.pushEnabled) {
+        startNotificationPolling();
+      }
+    } else if (!pushSubscription) {
+      // Browser: use Web Push via service worker
+      showToast("Requesting notification permission...");
+      const success = await subscribeToPush();
+      if (success) {
+        showToast("Push notifications enabled");
+        if (socket?.connected && pushSubscription) {
+          socket.emit("push-subscribe", {
+            subscription: pushSubscription.toJSON(),
+          });
+        }
+      } else {
+        showToast("Failed to enable push notifications");
+        e.target.checked = false;
+        settings.pushEnabled = false;
+        localStorage.setItem("pushEnabled", "false");
+      }
     }
-  } else if (!settings.pushEnabled && pushSubscription) {
-    try {
-      await pushSubscription.unsubscribe();
-      pushSubscription = null;
-      if (socket?.connected) {
-        socket.emit("push-unsubscribe");
-      }
+  } else {
+    // Disabling push
+    if (isCapacitor) {
+      stopNotificationPolling();
       showToast("Push notifications disabled");
-    } catch (err) {
-      console.error("Failed to unsubscribe from push:", err);
+    } else if (pushSubscription) {
+      try {
+        await pushSubscription.unsubscribe();
+        pushSubscription = null;
+        if (socket?.connected) {
+          socket.emit("push-unsubscribe");
+        }
+        showToast("Push notifications disabled");
+      } catch (err) {
+        console.error("Failed to unsubscribe from push:", err);
+      }
     }
   }
 };
@@ -3951,32 +4032,43 @@ if (isMobile && window.visualViewport) {
   const quickActionsBar = document.getElementById("quick-actions-bar");
 
   // Position input at bottom of visual viewport (above keyboard)
+  let repositionRaf = null;
   const repositionInput = () => {
-    const vv = window.visualViewport;
-    // Calculate where bottom of visual viewport is relative to layout viewport
-    const offsetTop = vv.offsetTop;
-    const bottomOfViewport = offsetTop + vv.height;
+    // Use rAF to ensure layout is stable before reading dimensions
+    if (repositionRaf) cancelAnimationFrame(repositionRaf);
+    repositionRaf = requestAnimationFrame(() => {
+      repositionRaf = null;
+      const vv = window.visualViewport;
+      // Calculate where bottom of visual viewport is relative to layout viewport
+      const offsetTop = vv.offsetTop;
+      const bottomOfViewport = offsetTop + vv.height;
 
-    // Position input area at bottom of visual viewport
-    if (inputArea) {
-      inputArea.style.position = "fixed";
-      inputArea.style.bottom = "auto";
-      inputArea.style.top = `${bottomOfViewport - inputArea.offsetHeight}px`;
-      inputArea.style.left = "0";
-      inputArea.style.right = "0";
-    }
+      // Position input area at bottom of visual viewport
+      if (inputArea) {
+        inputArea.style.position = "fixed";
+        inputArea.style.bottom = "auto";
+        inputArea.style.top = `${bottomOfViewport - inputArea.offsetHeight}px`;
+        inputArea.style.left = "0";
+        inputArea.style.right = "0";
+      }
 
-    // Position quick actions bar above input
-    if (quickActionsBar && !quickActionsBar.classList.contains("collapsed")) {
-      quickActionsBar.style.position = "fixed";
-      quickActionsBar.style.bottom = "auto";
-      quickActionsBar.style.top = `${bottomOfViewport - inputArea.offsetHeight - quickActionsBar.offsetHeight}px`;
-      quickActionsBar.style.left = "0";
-      quickActionsBar.style.right = "0";
-    }
+      // Position quick actions bar above input (always, regardless of collapsed state)
+      if (quickActionsBar && inputArea) {
+        quickActionsBar.style.position = "fixed";
+        quickActionsBar.style.bottom = "auto";
+        quickActionsBar.style.top = `${bottomOfViewport - inputArea.offsetHeight - quickActionsBar.offsetHeight}px`;
+        quickActionsBar.style.left = "0";
+        quickActionsBar.style.right = "0";
+        quickActionsBar.style.zIndex = "49";
+      }
+    });
   };
 
   const resetInputPosition = () => {
+    if (repositionRaf) {
+      cancelAnimationFrame(repositionRaf);
+      repositionRaf = null;
+    }
     if (inputArea) {
       inputArea.style.position = "";
       inputArea.style.bottom = "";
@@ -3990,6 +4082,7 @@ if (isMobile && window.visualViewport) {
       quickActionsBar.style.top = "";
       quickActionsBar.style.left = "";
       quickActionsBar.style.right = "";
+      quickActionsBar.style.zIndex = "";
     }
   };
 
@@ -3998,8 +4091,8 @@ if (isMobile && window.visualViewport) {
 
   promptInput.addEventListener("focus", () => {
     inputFocused = true;
-    // Small delay to let keyboard start opening
-    setTimeout(repositionInput, 50);
+    // Small delay to let keyboard start opening, then reposition
+    setTimeout(repositionInput, 100);
   });
 
   promptInput.addEventListener("blur", () => {
@@ -4009,7 +4102,7 @@ if (isMobile && window.visualViewport) {
       if (!inputFocused) {
         resetInputPosition();
       }
-    }, 100);
+    }, 150);
   });
 
   // Update position as keyboard animates open/closed

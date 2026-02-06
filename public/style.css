@@ -392,9 +392,7 @@ header {
   right: 0;
   margin-top: 8px;
   min-width: 180px;
-  background: rgba(34, 211, 238, 0.06);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: var(--surface);
   border: 1px solid var(--gold-dim);
   border-radius: 8px;
   box-shadow:
@@ -437,12 +435,12 @@ header {
 }
 
 .dropdown-item:hover {
-  background: rgba(34, 211, 238, 0.1);
+  background: rgba(34, 211, 238, 0.15);
   border-bottom-color: rgba(212, 160, 23, 0.3);
 }
 
 .dropdown-item:active {
-  background: rgba(34, 211, 238, 0.2);
+  background: rgba(34, 211, 238, 0.25);
   color: white;
 }
 
@@ -2247,9 +2245,12 @@ body.light-theme .term-footer {
   }
 
   /* Input area will be positioned via JS when keyboard opens */
-  #input-area,
-  #quick-actions-bar {
+  #input-area {
     z-index: 50;
+  }
+
+  #quick-actions-bar {
+    z-index: 49;
   }
 
   /* Ensure textarea doesn't zoom on iOS (font-size >= 16px) */
@@ -2787,7 +2788,8 @@ body.light-theme .term-footer {
   border-top: var(--glass-border);
   box-shadow: var(--glass-inner-glow);
   overflow: hidden;
-  transition: max-height 0.3s ease;
+  position: relative;
+  z-index: 49;
 }
 
 #quick-actions-bar.collapsed #actions-bar-content {

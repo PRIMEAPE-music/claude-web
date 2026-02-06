@@ -73,6 +73,9 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 const pushSubscriptions = new Map();
 // Track client visibility per SESSION (sessionId -> boolean)
 const clientVisibility = new Map();
+// Track pending notifications for polling (sessionId -> { title, body, timestamp })
+// Used by Capacitor Android apps that can't use Web Push (no PushManager in WebView)
+const pendingNotifications = new Map();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -333,6 +336,22 @@ app.get("/api/images", async (req, res) => {
   }
 });
 
+// Poll for pending notifications (used by Capacitor Android apps)
+// WebView doesn't support PushManager, so the app polls when backgrounded
+app.get("/api/notifications/:sessionId", (req, res) => {
+  const sid = req.params.sessionId;
+  if (!isValidUUID(sid)) {
+    return res.status(400).json({ error: "Invalid session ID" });
+  }
+  const pending = pendingNotifications.get(sid);
+  if (pending) {
+    pendingNotifications.delete(sid);
+    res.json({ notification: pending });
+  } else {
+    res.json({ notification: null });
+  }
+});
+
 // Cleanup old screenshots periodically
 async function cleanupOldScreenshots() {
   try {
@@ -366,6 +385,14 @@ async function cleanupOldScreenshots() {
 setInterval(cleanupOldScreenshots, 60 * 60 * 1000);
 // Also run on startup
 cleanupOldScreenshots();
+
+// Cleanup stale pending notifications (older than 5 minutes)
+setInterval(() => {
+  const cutoff = Date.now() - 5 * 60 * 1000;
+  for (const [sid, notif] of pendingNotifications) {
+    if (notif.timestamp < cutoff) pendingNotifications.delete(sid);
+  }
+}, 60 * 1000);
 
 // Socket.io authentication
 io.use(socketAuthMiddleware);
@@ -808,29 +835,35 @@ io.on("connection", (socket) => {
               `[${sessionId}] Push check: visible=${isVisible}, hasSubscription=${!!subscription}, validSub=${isValidSubscription}, vapid=${!!process.env.VAPID_PUBLIC_KEY}`,
             );
 
-            if (
-              !isVisible &&
-              isValidSubscription &&
-              process.env.VAPID_PUBLIC_KEY
-            ) {
-              try {
-                await webpush.sendNotification(
-                  subscription,
-                  JSON.stringify({
-                    title: "Claude Web",
-                    body: "Response complete",
-                    sessionId: sessionId,
-                    url: "/",
-                  }),
-                );
-                console.log(`[${sessionId}] Push notification sent`);
-              } catch (err) {
-                console.error(
-                  `[${sessionId}] Push notification failed:`,
-                  err.message,
-                );
-                if (err.statusCode >= 400 && err.statusCode < 500) {
-                  pushSubscriptions.delete(sessionId);
+            if (!isVisible) {
+              // Store pending notification for polling (Capacitor Android)
+              pendingNotifications.set(sessionId, {
+                title: "Claude Web",
+                body: "Response complete",
+                timestamp: Date.now(),
+              });
+
+              // Also try Web Push if available (browsers with PushManager)
+              if (isValidSubscription && process.env.VAPID_PUBLIC_KEY) {
+                try {
+                  await webpush.sendNotification(
+                    subscription,
+                    JSON.stringify({
+                      title: "Claude Web",
+                      body: "Response complete",
+                      sessionId: sessionId,
+                      url: "/",
+                    }),
+                  );
+                  console.log(`[${sessionId}] Push notification sent`);
+                } catch (err) {
+                  console.error(
+                    `[${sessionId}] Push notification failed:`,
+                    err.message,
+                  );
+                  if (err.statusCode >= 400 && err.statusCode < 500) {
+                    pushSubscriptions.delete(sessionId);
+                  }
                 }
               }
             }
