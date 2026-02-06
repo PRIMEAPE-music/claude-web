@@ -15,6 +15,7 @@
     "better-sqlite3": "^12.6.2",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
+    "puppeteer-core": "^24.36.1",
     "socket.io": "^4.8.1",
     "uuid": "^11.1.0",
     "web-push": "^3.6.7"

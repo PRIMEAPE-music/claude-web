@@ -325,6 +325,7 @@ header {
   justify-content: space-between;
   align-items: center;
   padding: 8px 12px;
+  padding-top: max(8px, env(safe-area-inset-top));
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
@@ -614,6 +615,7 @@ header {
   transition: transform 0.3s ease;
   overflow-y: auto;
   box-shadow: 4px 0 16px var(--shadow);
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
 }
 
 #sidebar:not(.hidden) {
@@ -2194,25 +2196,6 @@ body.light-theme .term-footer {
 #stop-btn {
   background: var(--error);
   color: white;
-}
-
-#voice-btn {
-  font-size: 24px;
-}
-
-#voice-btn.recording {
-  color: var(--error);
-  animation: pulse 1s infinite;
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
 }
 
 /* Toast notifications */

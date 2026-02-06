@@ -8,12 +8,19 @@ import {
   unlink,
   access,
 } from "fs/promises";
-import { join } from "path";
+import { join, extname } from "path";
 import { homedir } from "os";
 import { constants } from "fs";
 
 const sessions = new Map();
 const SESSIONS_DIR = join(homedir(), ".claude", "claude-web", "sessions");
+
+// Shared browser WS endpoint (set by server.js when shared browser is active)
+let globalBrowserWSEndpoint = null;
+
+export function setBrowserWSEndpoint(wsEndpoint) {
+  globalBrowserWSEndpoint = wsEndpoint;
+}
 
 // Validate UUID format for session IDs
 function isValidUUID(id) {
@@ -108,8 +115,9 @@ export async function runClaudeCommand(
   // Build command string - use stream-json for real-time token streaming
   // Note: stream-json requires --verbose when used with --print
   // --include-partial-messages ensures agent/Task tool output is streamed
+  // --input-format stream-json enables native image support via stdin
   let cmd =
-    "claude --print --verbose --output-format stream-json --include-partial-messages --dangerously-skip-permissions";
+    "claude --print --verbose --output-format stream-json --input-format stream-json --include-partial-messages --dangerously-skip-permissions";
 
   // Add model selection if specified
   if (session.model) {
@@ -121,29 +129,66 @@ export async function runClaudeCommand(
     cmd += ` --resume ${session.claudeSessionId}`;
   }
 
-  // Build final prompt with image references
-  let finalPrompt = prompt;
+  // Build message content blocks for stream-json input
+  const contentBlocks = [];
 
-  // If images are provided, prepend image paths for Claude to read
+  // If images are provided, read them and add as native image content blocks
   if (imagePaths && imagePaths.length > 0) {
-    const imageRefs = imagePaths.map((p) => `[Image: ${p}]`).join("\n");
-    finalPrompt = `The user has attached the following image(s). Please read and analyze them:\n${imageRefs}\n\nUser message: ${prompt}`;
+    for (const imgPath of imagePaths) {
+      try {
+        const imgData = await readFile(imgPath);
+        const base64Data = imgData.toString("base64");
+        const ext = extname(imgPath).toLowerCase().replace(".", "");
+        const mediaTypes = {
+          png: "image/png",
+          jpg: "image/jpeg",
+          jpeg: "image/jpeg",
+          gif: "image/gif",
+          webp: "image/webp",
+        };
+        const mediaType = mediaTypes[ext] || "image/png";
+        contentBlocks.push({
+          type: "image",
+          source: { type: "base64", media_type: mediaType, data: base64Data },
+        });
+      } catch (err) {
+        console.warn(`Failed to read image ${imgPath}: ${err.message}`);
+      }
+    }
   }
 
-  // Add the prompt (properly escaped)
-  cmd += ` ${shellEscape(finalPrompt)}`;
+  // Add the text prompt
+  contentBlocks.push({ type: "text", text: prompt || "What do you see?" });
 
-  console.log(`Running command: ${cmd.substring(0, 100)}...`);
+  // Build the stream-json input message
+  const inputMessage = JSON.stringify({
+    type: "user",
+    message: { role: "user", content: contentBlocks },
+  });
+
+  console.log(
+    `Running command: ${cmd.substring(0, 100)}... (${contentBlocks.length} content blocks)`,
+  );
   console.log(`Working directory: ${workingDir}`);
+
+  // Build env, optionally passing shared browser WS endpoint
+  const env = { ...process.env, FORCE_COLOR: "0" };
+  if (globalBrowserWSEndpoint) {
+    env.PUPPETEER_BROWSER_WS_ENDPOINT = globalBrowserWSEndpoint;
+  }
 
   const proc = spawn("sh", ["-c", cmd], {
     cwd: workingDir,
-    env: { ...process.env, FORCE_COLOR: "0" },
-    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    stdio: ["pipe", "pipe", "pipe"],
     detached: false,
   });
 
   console.log(`Claude process started with PID: ${proc.pid}`);
+
+  // Write the message via stdin (stream-json input format) and close stdin
+  proc.stdin.write(inputMessage + "\n");
+  proc.stdin.end();
 
   session.process = proc;
   session.history.push({ role: "user", content: prompt });
@@ -206,6 +251,35 @@ export async function runClaudeCommand(
                     type: "agent_spawned",
                     agent: agentInfo,
                     activeCount: session.activeAgents.size,
+                  });
+                }
+
+                // Detect Claude's puppeteer/browser tool usage
+                const PUPPETEER_TOOL_MAP = {
+                  puppeteer_navigate: "navigate",
+                  puppeteer_screenshot: "screenshot",
+                  puppeteer_click: "click",
+                  puppeteer_fill: "fill",
+                  puppeteer_evaluate: "evaluate",
+                  puppeteer_hover: "hover",
+                  puppeteer_select: "select",
+                  mcp__puppeteer__puppeteer_navigate: "navigate",
+                  mcp__puppeteer__puppeteer_screenshot: "screenshot",
+                  mcp__puppeteer__puppeteer_click: "click",
+                  mcp__puppeteer__puppeteer_fill: "fill",
+                  mcp__puppeteer__puppeteer_evaluate: "evaluate",
+                  mcp__puppeteer__puppeteer_hover: "hover",
+                  mcp__puppeteer__puppeteer_select: "select",
+                };
+                const browserAction = PUPPETEER_TOOL_MAP[block.name];
+                if (browserAction) {
+                  bufferAndSend({
+                    type: "browser_action",
+                    source: "claude",
+                    action: browserAction,
+                    toolName: block.name,
+                    input: block.input || {},
+                    id: block.id,
                   });
                 }
               }

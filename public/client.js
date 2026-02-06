@@ -9,7 +9,6 @@ const messages = document.getElementById("messages");
 const promptInput = document.getElementById("prompt");
 const sendBtn = document.getElementById("send-btn");
 const stopBtn = document.getElementById("stop-btn");
-const voiceBtn = document.getElementById("voice-btn");
 const menuBtn = document.getElementById("menu-btn");
 const headerDropdownBtn = document.getElementById("header-dropdown-btn");
 const headerDropdownMenu = document.getElementById("header-dropdown-menu");
@@ -26,7 +25,11 @@ const welcomeMessage = document.getElementById("welcome-message");
 const notificationSound = document.getElementById("notification-sound");
 notificationSound.volume = 0.1; // 90% quieter
 const uploadBtn = document.getElementById("upload-btn");
+const uploadMenu = document.getElementById("upload-menu");
+const uploadAttachBtn = document.getElementById("upload-attach");
+const uploadSaveBtn = document.getElementById("upload-save");
 const fileUpload = document.getElementById("file-upload");
+const fileTransfer = document.getElementById("file-transfer");
 const imagePreviewArea = document.getElementById("image-preview-area");
 const imageLightbox = document.getElementById("image-lightbox");
 const lightboxImage = document.getElementById("lightbox-image");
@@ -38,8 +41,6 @@ let socket = null;
 let currentResponse = null;
 let isStreaming = false;
 let workingDir = localStorage.getItem("claude-web-workingDir") || "~";
-let recognition = null;
-
 // Streaming state
 let pendingText = "";
 let renderTimeout = null;
@@ -484,7 +485,9 @@ function connect(token) {
           if (toolItem) {
             const content = toolItem.querySelector(".tool-content");
             if (content && chunk.output) {
-              content.textContent = chunk.output;
+              if (!tryRenderMusicCard(chunk.output, content, toolItem)) {
+                content.textContent = chunk.output;
+              }
             }
           }
         }
@@ -715,8 +718,7 @@ function connect(token) {
               // Check if output contains an image
               const imageDataUrl = renderImageContent(chunk.output);
               if (imageDataUrl) {
-                // Render as image
-                content.innerHTML = "";
+                // Append image (don't clear — a music card may already be there)
                 const imgWrapper = document.createElement("div");
                 imgWrapper.className = "tool-image-result";
                 const img = document.createElement("img");
@@ -729,7 +731,7 @@ function connect(token) {
                 // Auto-expand tool items with images
                 toolItem.classList.add("expanded");
                 header.querySelector("span:last-child").textContent = "▲";
-              } else {
+              } else if (!tryRenderMusicCard(chunk.output, content, toolItem)) {
                 content.textContent = chunk.output;
               }
             }
@@ -776,6 +778,24 @@ function connect(token) {
       }
       updateAgentPill();
       updateAgentSheet();
+    } else if (chunk.type === "browser_action") {
+      // Claude used a puppeteer tool — log it in the activity log
+      addActivityEntry({
+        id: chunk.id,
+        timestamp: new Date().toISOString(),
+        source: "claude",
+        action: chunk.action,
+        details: chunk.input || {},
+      });
+      // Auto-refresh screenshot if shared mode + puppeteer tab is open
+      if (
+        sharedBrowserMode &&
+        sharedBrowserRunning &&
+        browserPreviewMode === "puppeteer" &&
+        !browserPreviewModal.classList.contains("hidden")
+      ) {
+        setTimeout(takePuppeteerScreenshot, 1000);
+      }
     }
   });
 
@@ -2311,47 +2331,6 @@ function renderFileList(files, path) {
   });
 }
 
-// Voice input
-if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
-  const SpeechRecognition =
-    window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = new SpeechRecognition();
-  recognition.continuous = false;
-  recognition.interimResults = true;
-  recognition.lang = "en-US";
-
-  recognition.onresult = (event) => {
-    const transcript = Array.from(event.results)
-      .map((result) => result[0].transcript)
-      .join("");
-    promptInput.value = transcript;
-    promptInput.style.height = "auto";
-    promptInput.style.height = Math.min(promptInput.scrollHeight, 120) + "px";
-  };
-
-  recognition.onend = () => {
-    voiceBtn.classList.remove("recording");
-  };
-
-  recognition.onerror = () => {
-    voiceBtn.classList.remove("recording");
-    showToast("Voice recognition error");
-  };
-
-  voiceBtn.onclick = () => {
-    if (voiceBtn.classList.contains("recording")) {
-      recognition.stop();
-    } else {
-      recognition.start();
-      voiceBtn.classList.add("recording");
-      showToast("Listening...");
-      if (settings.vibrateEnabled && navigator.vibrate) navigator.vibrate(50);
-    }
-  };
-} else {
-  voiceBtn.style.display = "none";
-}
-
 // Agent Pill and Bottom Sheet UI
 function updateAgentPill() {
   let pill = document.getElementById("agent-pill");
@@ -2495,10 +2474,68 @@ function showToast(message) {
   setTimeout(() => toast.remove(), 3000);
 }
 
-// Image upload handling
-uploadBtn.onclick = () => {
+// File upload menu handling
+uploadBtn.onclick = (e) => {
+  e.stopPropagation();
+  uploadMenu.classList.toggle("hidden");
+};
+
+// Close upload menu when clicking elsewhere
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#upload-menu-wrapper")) {
+    uploadMenu.classList.add("hidden");
+  }
+});
+
+uploadAttachBtn.onclick = () => {
+  uploadMenu.classList.add("hidden");
   fileUpload.click();
 };
+
+uploadSaveBtn.onclick = () => {
+  uploadMenu.classList.add("hidden");
+  fileTransfer.click();
+};
+
+// File transfer to computer (save to ~/Uploads/)
+const MAX_TRANSFER_SIZE = 50 * 1024 * 1024; // 50MB per file
+
+fileTransfer.onchange = async (e) => {
+  const files = Array.from(e.target.files);
+  if (files.length === 0) return;
+
+  for (const file of files) {
+    if (file.size > MAX_TRANSFER_SIZE) {
+      showToast(`File too large: ${file.name} (max 50MB)`);
+      continue;
+    }
+
+    showToast(`Uploading ${file.name}...`);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const dataUrl = event.target.result;
+      socket.emit("file-transfer", {
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size,
+        data: dataUrl,
+      });
+    };
+    reader.readAsDataURL(file);
+  }
+
+  fileTransfer.value = "";
+};
+
+// File transfer response handlers
+socket.on("file-transfer-complete", (data) => {
+  showToast(`Saved: ${data.filename}`);
+});
+
+socket.on("file-transfer-error", (data) => {
+  showToast(`Upload failed: ${data.message}`);
+});
 
 fileUpload.onchange = async (e) => {
   const files = Array.from(e.target.files);
@@ -2662,6 +2699,508 @@ function renderImageContent(content) {
   }
 
   return null;
+}
+
+// ===== Music Analysis Card Renderers =====
+
+const MC_SEGMENT_COLORS = [
+  "#e94560",
+  "#4ade80",
+  "#fbbf24",
+  "#60a5fa",
+  "#c084fc",
+  "#f472b6",
+  "#34d399",
+  "#fb923c",
+];
+
+function formatMusicTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function escapeHtmlMC(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function createMusicCollapsible(label, content, isPre = true) {
+  const div = document.createElement("div");
+  div.className = "mc-collapsible";
+  const toggle = document.createElement("button");
+  toggle.className = "mc-collapsible-toggle";
+  toggle.textContent = `${label} ▼`;
+  toggle.onclick = (e) => {
+    e.stopPropagation();
+    div.classList.toggle("open");
+    toggle.textContent = div.classList.contains("open")
+      ? `${label} ▲`
+      : `${label} ▼`;
+  };
+  const body = document.createElement(isPre ? "pre" : "div");
+  body.className = "mc-collapsible-body";
+  if (isPre) {
+    body.textContent =
+      typeof content === "string" ? content : JSON.stringify(content, null, 2);
+  } else {
+    body.innerHTML = content;
+  }
+  div.appendChild(toggle);
+  div.appendChild(body);
+  return div;
+}
+
+function tryRenderMusicCard(output, contentEl, toolItem) {
+  if (!output || typeof output !== "string") return false;
+
+  let data;
+  try {
+    data = JSON.parse(output);
+  } catch {
+    return false;
+  }
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+
+  // Fingerprint detection (most specific first)
+  if (
+    data.tempo_bpm !== undefined &&
+    data.beat_times &&
+    data.backend !== undefined
+  ) {
+    renderBeatCard(data, contentEl);
+  } else if (
+    data.genre &&
+    data.mood &&
+    data.danceability !== undefined &&
+    data.voice_instrumental
+  ) {
+    renderClassifyCard(data, contentEl);
+  } else if (
+    data.spectral_centroid_hz !== undefined &&
+    data.key !== undefined &&
+    data.tempo_bpm !== undefined
+  ) {
+    renderTrackAnalysisCard(data, contentEl);
+  } else if (
+    data.language &&
+    data.audio_source &&
+    Array.isArray(data.segments) &&
+    data.segments.length > 0 &&
+    data.segments[0].text !== undefined
+  ) {
+    renderTranscriptionCard(data, contentEl);
+  } else if (
+    data.energy_db &&
+    data.dynamic_range_db !== undefined &&
+    data.frame_size_sec !== undefined
+  ) {
+    renderEnergyCard(data, contentEl);
+  } else if (
+    data.total_segments !== undefined &&
+    Array.isArray(data.segments) &&
+    data.segments.length > 0 &&
+    data.segments[0].label !== undefined
+  ) {
+    renderSegmentsCard(data, contentEl);
+  } else {
+    return false;
+  }
+
+  // Auto-expand tool item
+  if (toolItem) {
+    toolItem.classList.add("expanded");
+    const arrow = toolItem.querySelector(".tool-item-header span:last-child");
+    if (arrow) arrow.textContent = "▲";
+  }
+
+  return true;
+}
+
+function renderBeatCard(data, el) {
+  el.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "mc-card mc-card-beats";
+
+  const timeSig = data.time_signature || "—";
+  const stability = data.tempo_stability || "unknown";
+  const stabilityClass = `mc-stability-${stability}`;
+
+  card.innerHTML = `
+    <div class="mc-card-header">
+      <span class="mc-card-title">Beat Analysis</span>
+      <span class="mc-badge mc-badge-backend">${escapeHtmlMC(data.backend)}</span>
+    </div>
+    <div class="mc-card-body">
+      <div class="mc-stats-grid mc-stats-grid-3">
+        <div class="mc-stat mc-stat-primary">
+          <span class="mc-stat-value">${data.tempo_bpm}</span>
+          <span class="mc-stat-label">BPM</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value"><span class="mc-badge">${escapeHtmlMC(timeSig)}</span></span>
+          <span class="mc-stat-label">Time Sig</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value ${stabilityClass}">${escapeHtmlMC(stability)}</span>
+          <span class="mc-stat-label">Stability</span>
+        </div>
+      </div>
+      <div class="mc-stats-grid mc-stats-grid-3">
+        <div class="mc-stat">
+          <span class="mc-stat-value">${data.beat_count || 0}</span>
+          <span class="mc-stat-label">Beats</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value">${data.downbeat_count || 0}</span>
+          <span class="mc-stat-label">Downbeats</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value">${data.avg_beat_interval_sec != null ? data.avg_beat_interval_sec + "s" : "—"}</span>
+          <span class="mc-stat-label">Avg Interval</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  card
+    .querySelector(".mc-card-body")
+    .appendChild(createMusicCollapsible("Raw Data", data));
+  el.appendChild(card);
+}
+
+function renderClassifyCard(data, el) {
+  el.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "mc-card mc-card-classify";
+
+  const backend = data.backend || "unknown";
+
+  // Genre bars
+  let genreBarsHtml = "";
+  const genreObj =
+    typeof data.genre === "object" && !Array.isArray(data.genre)
+      ? data.genre
+      : {};
+  // Handle nested genre (essentia returns {dortmund: {...}, rosamerica: {...}})
+  let genreEntries = [];
+  for (const [k, v] of Object.entries(genreObj)) {
+    if (typeof v === "number") {
+      genreEntries.push([k, v]);
+    } else if (typeof v === "object") {
+      // Nested: merge into flat list
+      for (const [k2, v2] of Object.entries(v)) {
+        if (typeof v2 === "number") genreEntries.push([k2, v2]);
+      }
+    }
+  }
+  // Deduplicate by taking max score per genre name
+  const genreMap = new Map();
+  for (const [k, v] of genreEntries) {
+    genreMap.set(k, Math.max(genreMap.get(k) || 0, v));
+  }
+  genreEntries = [...genreMap.entries()].sort((a, b) => b[1] - a[1]);
+
+  for (const [name, score] of genreEntries) {
+    const pct = (score * 100).toFixed(1);
+    genreBarsHtml += `
+      <div class="mc-bar-row">
+        <span class="mc-bar-label">${escapeHtmlMC(name)}</span>
+        <div class="mc-bar"><div class="mc-bar-fill" style="width: ${pct}%"></div></div>
+        <span class="mc-bar-value">${pct}%</span>
+      </div>`;
+  }
+
+  // Mood tags
+  let moodHtml = "";
+  const moodObj =
+    typeof data.mood === "object" && !Array.isArray(data.mood) ? data.mood : {};
+  // Handle nested mood (essentia returns {aggressive: {...}, happy: {...}})
+  let moodEntries = [];
+  for (const [k, v] of Object.entries(moodObj)) {
+    if (typeof v === "number") {
+      moodEntries.push([k, v]);
+    } else if (typeof v === "object") {
+      // For essentia nested mood, take the positive class score
+      const positiveKey = Object.keys(v).find(
+        (key) => !key.startsWith("not_") && !key.startsWith("non_"),
+      );
+      if (positiveKey && typeof v[positiveKey] === "number") {
+        moodEntries.push([k, v[positiveKey]]);
+      }
+    }
+  }
+  moodEntries.sort((a, b) => b[1] - a[1]);
+  for (const [name, score] of moodEntries) {
+    const pct = (score * 100).toFixed(0);
+    const opacity = Math.max(0.4, score);
+    moodHtml += `<span class="mc-tag" style="opacity: ${opacity}">${escapeHtmlMC(name)} (${pct}%)</span>`;
+  }
+
+  // Danceability
+  const dance =
+    typeof data.danceability === "number"
+      ? data.danceability
+      : typeof data.danceability === "object"
+        ? Object.values(data.danceability).find((v) => typeof v === "number") ||
+          0
+        : 0;
+  const dancePct = (dance * 100).toFixed(1);
+
+  // Voice/Instrumental
+  const vi = data.voice_instrumental || {};
+  const voiceScore =
+    vi.voice_likelihood ??
+    vi.voice ??
+    Object.values(vi).find((v) => typeof v === "number") ??
+    0.5;
+  const voicePct = (voiceScore * 100).toFixed(0);
+  const instrPct = ((1 - voiceScore) * 100).toFixed(0);
+
+  card.innerHTML = `
+    <div class="mc-card-header">
+      <span class="mc-card-title">Classification</span>
+      <span class="mc-badge mc-badge-backend">${escapeHtmlMC(backend)}</span>
+    </div>
+    <div class="mc-card-body">
+      <div class="mc-section-label">Genre</div>
+      <div class="mc-bars">${genreBarsHtml}</div>
+      <div class="mc-section-label">Mood</div>
+      <div class="mc-tags">${moodHtml}</div>
+      <div class="mc-section-label">Danceability</div>
+      <div class="mc-bar-row">
+        <div class="mc-bar mc-bar-accent"><div class="mc-bar-fill" style="width: ${dancePct}%"></div></div>
+        <span class="mc-bar-value">${dancePct}%</span>
+      </div>
+      <div class="mc-section-label">Voice / Instrumental</div>
+      <div class="mc-split-bar">
+        <div class="mc-split-voice" style="width: ${voicePct}%">Voice ${voicePct}%</div>
+        <div class="mc-split-instrumental" style="width: ${instrPct}%">Instrumental ${instrPct}%</div>
+      </div>
+    </div>
+  `;
+
+  card
+    .querySelector(".mc-card-body")
+    .appendChild(createMusicCollapsible("Raw Data", data));
+  el.appendChild(card);
+}
+
+function renderTrackAnalysisCard(data, el) {
+  el.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "mc-card mc-card-analysis";
+
+  const duration = data.duration_sec ? formatMusicTime(data.duration_sec) : "—";
+  const key = data.key || "—";
+  const keyConf = data.key_confidence
+    ? `(${(data.key_confidence * 100).toFixed(0)}%)`
+    : "";
+  const loudness =
+    data.loudness_db != null ? `${data.loudness_db.toFixed(1)} dB` : "—";
+  const filename = data.file || "";
+
+  card.innerHTML = `
+    <div class="mc-card-header">
+      <span class="mc-card-title">Track Analysis</span>
+      ${filename ? `<span class="mc-badge">${escapeHtmlMC(filename)}</span>` : ""}
+    </div>
+    <div class="mc-card-body">
+      <div class="mc-stats-grid mc-stats-grid-4">
+        <div class="mc-stat">
+          <span class="mc-stat-value">${duration}</span>
+          <span class="mc-stat-label">Duration</span>
+        </div>
+        <div class="mc-stat mc-stat-primary">
+          <span class="mc-stat-value">${data.tempo_bpm}</span>
+          <span class="mc-stat-label">BPM</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value">${escapeHtmlMC(key)}</span>
+          <span class="mc-stat-label">Key ${keyConf}</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value">${loudness}</span>
+          <span class="mc-stat-label">Loudness</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Spectral details collapsible
+  if (data.spectral_centroid_hz != null) {
+    const spectralHtml = `
+      <div class="mc-stats-grid mc-stats-grid-3">
+        <div class="mc-stat">
+          <span class="mc-stat-value">${data.spectral_centroid_hz.toFixed(1)}</span>
+          <span class="mc-stat-label">Centroid (Hz)</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value">${data.spectral_bandwidth_hz != null ? data.spectral_bandwidth_hz.toFixed(1) : "—"}</span>
+          <span class="mc-stat-label">Bandwidth (Hz)</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value">${data.spectral_rolloff_hz != null ? data.spectral_rolloff_hz.toFixed(1) : "—"}</span>
+          <span class="mc-stat-label">Rolloff (Hz)</span>
+        </div>
+      </div>`;
+    card
+      .querySelector(".mc-card-body")
+      .appendChild(
+        createMusicCollapsible("Spectral Details", spectralHtml, false),
+      );
+  }
+
+  card
+    .querySelector(".mc-card-body")
+    .appendChild(createMusicCollapsible("Raw Data", data));
+  el.appendChild(card);
+}
+
+function renderTranscriptionCard(data, el) {
+  el.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "mc-card mc-card-lyrics";
+
+  const lang = data.language || "?";
+  const model = data.model_size || "";
+  const source = data.audio_source || "";
+
+  let badgesHtml = `<span class="mc-badge">${escapeHtmlMC(lang)}</span>`;
+  if (model)
+    badgesHtml += `<span class="mc-badge mc-badge-backend">${escapeHtmlMC(model)}</span>`;
+  if (source)
+    badgesHtml += `<span class="mc-badge">${escapeHtmlMC(source)}</span>`;
+
+  let lyricsHtml = "";
+  const segments = data.segments || [];
+  for (const seg of segments) {
+    const time = formatMusicTime(seg.start || 0);
+    lyricsHtml += `
+      <div class="mc-lyric-line">
+        <span class="mc-lyric-time">${time}</span>
+        <span class="mc-lyric-text">${escapeHtmlMC(seg.text || "")}</span>
+      </div>`;
+  }
+
+  card.innerHTML = `
+    <div class="mc-card-header">
+      <span class="mc-card-title">Transcription</span>
+      ${badgesHtml}
+    </div>
+    <div class="mc-card-body">
+      <div class="mc-lyrics">${lyricsHtml}</div>
+    </div>
+  `;
+
+  if (data.text) {
+    card
+      .querySelector(".mc-card-body")
+      .appendChild(createMusicCollapsible("Full Text", data.text, true));
+  }
+  card
+    .querySelector(".mc-card-body")
+    .appendChild(createMusicCollapsible("Raw Data", data));
+  el.appendChild(card);
+}
+
+function renderEnergyCard(data, el) {
+  el.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "mc-card mc-card-energy";
+
+  const mean =
+    data.mean_energy_db != null ? `${data.mean_energy_db.toFixed(1)} dB` : "—";
+  const max =
+    data.max_energy_db != null ? `${data.max_energy_db.toFixed(1)} dB` : "—";
+  const min =
+    data.min_energy_db != null ? `${data.min_energy_db.toFixed(1)} dB` : "—";
+  const range =
+    data.dynamic_range_db != null
+      ? `${data.dynamic_range_db.toFixed(1)} dB`
+      : "—";
+
+  card.innerHTML = `
+    <div class="mc-card-header">
+      <span class="mc-card-title">Energy Profile</span>
+    </div>
+    <div class="mc-card-body">
+      <div class="mc-stats-grid mc-stats-grid-4">
+        <div class="mc-stat">
+          <span class="mc-stat-value">${mean}</span>
+          <span class="mc-stat-label">Mean</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value">${max}</span>
+          <span class="mc-stat-label">Max</span>
+        </div>
+        <div class="mc-stat">
+          <span class="mc-stat-value">${min}</span>
+          <span class="mc-stat-label">Min</span>
+        </div>
+        <div class="mc-stat mc-stat-primary">
+          <span class="mc-stat-value">${range}</span>
+          <span class="mc-stat-label">Dynamic Range</span>
+        </div>
+      </div>
+    </div>
+  `;
+
+  card
+    .querySelector(".mc-card-body")
+    .appendChild(createMusicCollapsible("Raw Data", data));
+  el.appendChild(card);
+}
+
+function renderSegmentsCard(data, el) {
+  el.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "mc-card mc-card-segments";
+
+  const segments = data.segments || [];
+  const count = data.total_segments || segments.length;
+
+  // Timeline bar
+  let timelineHtml = "";
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const dur =
+      seg.duration_sec || (seg.end_sec || 0) - (seg.start_sec || 0) || 1;
+    const color = MC_SEGMENT_COLORS[i % MC_SEGMENT_COLORS.length];
+    const titleText = `${seg.label || "Section"}: ${formatMusicTime(seg.start_sec || 0)} - ${formatMusicTime(seg.end_sec || 0)}`;
+    const titleAttr = escapeHtmlMC(titleText).replace(/"/g, "&quot;");
+    timelineHtml += `<div class="mc-timeline-segment" style="flex: ${dur}; background: ${color}" title="${titleAttr}"><span>${i + 1}</span></div>`;
+  }
+
+  // Segment list
+  let listHtml = "";
+  for (const seg of segments) {
+    const dur =
+      seg.duration_sec || (seg.end_sec || 0) - (seg.start_sec || 0) || 0;
+    listHtml += `
+      <div class="mc-segment-item">
+        <span class="mc-segment-label">${escapeHtmlMC(seg.label || "Section")}</span>
+        <span class="mc-segment-time">${formatMusicTime(seg.start_sec || 0)} — ${formatMusicTime(seg.end_sec || 0)} (${dur.toFixed(1)}s)</span>
+      </div>`;
+  }
+
+  card.innerHTML = `
+    <div class="mc-card-header">
+      <span class="mc-card-title">Song Structure</span>
+      <span class="mc-badge">${count} sections</span>
+    </div>
+    <div class="mc-card-body">
+      <div class="mc-timeline">${timelineHtml}</div>
+      <div class="mc-segment-list">${listHtml}</div>
+    </div>
+  `;
+
+  card
+    .querySelector(".mc-card-body")
+    .appendChild(createMusicCollapsible("Raw Data", data));
+  el.appendChild(card);
 }
 
 // Keyboard shortcuts
@@ -3829,6 +4368,18 @@ let browserPreviewMode = "iframe"; // "iframe" | "puppeteer" | "html"
 let currentViewport = "desktop"; // "mobile" | "tablet" | "desktop"
 let puppeteerClickMode = false;
 let browserPreviewListenersSetup = false;
+let autoRefreshEnabled = false;
+let autoRefreshTimer = null;
+let browserHistoryStack = []; // URLs we've navigated to
+let browserHistoryIndex = -1; // Current position in history
+
+// Shared Browser State
+let sharedBrowserMode = false; // true when in shared mode
+let sharedBrowserRunning = false; // true when Chrome is running
+let sharedBrowserPages = []; // Array of {id, url, title}
+let currentSharedPageId = null; // Currently selected page
+let browserActivityLog = []; // Activity entries
+let activityLogVisible = false; // Activity panel expanded
 
 // Browser Preview Elements
 const browserPreviewBtn = document.getElementById("browser-preview-btn");
@@ -3873,8 +4424,47 @@ const devtoolsOutput = document.getElementById("devtools-output");
 const devtoolsInput = document.getElementById("devtools-input");
 const devtoolsRunBtn = document.getElementById("devtools-run");
 
+// Navigation elements
+const browserBackBtn = document.getElementById("browser-back-btn");
+const browserForwardBtn = document.getElementById("browser-forward-btn");
+
+// Interaction bar elements
+const browserInteractionBar = document.getElementById(
+  "browser-interaction-bar",
+);
+const puppeteerScrollUpBtn = document.getElementById("puppeteer-scroll-up");
+const puppeteerScrollDownBtn = document.getElementById("puppeteer-scroll-down");
+const keyboardButtons = document.querySelectorAll(".key-btn");
+const puppeteerTextInput = document.getElementById("puppeteer-text-input");
+const puppeteerTextSendBtn = document.getElementById("puppeteer-text-send");
+const autoRefreshBtn = document.getElementById("puppeteer-auto-refresh");
+const autoRefreshIntervalSelect = document.getElementById(
+  "puppeteer-auto-refresh-interval",
+);
+
 // Viewport buttons
 const viewportButtons = document.querySelectorAll(".viewport-btn");
+
+// Shared Browser elements
+const connectionModeButtons = document.querySelectorAll(".mode-btn");
+const sharedBrowserControls = document.getElementById(
+  "shared-browser-controls",
+);
+const sharedBrowserStartBtn = document.getElementById(
+  "shared-browser-start-btn",
+);
+const sharedBrowserStopBtn = document.getElementById("shared-browser-stop-btn");
+const sharedBrowserPageSelect = document.getElementById(
+  "shared-browser-page-select",
+);
+const sharedBrowserStatusIndicator = document.getElementById(
+  "shared-browser-status-indicator",
+);
+const sharedBadge = document.getElementById("shared-badge");
+const toggleActivityLogBtn = document.getElementById("toggle-activity-log");
+const activityLogPanel = document.getElementById("activity-log-panel");
+const activityLogEntries = document.getElementById("activity-log-entries");
+const activityLogCount = document.getElementById("activity-log-count");
 
 // Open Browser Preview Modal
 function openBrowserPreview() {
@@ -3885,11 +4475,23 @@ function openBrowserPreview() {
   if (socket?.connected && !browserPreviewListenersSetup) {
     setupBrowserPreviewSocketListeners();
   }
+
+  // Load activity log and check shared browser status
+  if (socket?.connected) {
+    socket.emit("browser-activity-list");
+    if (sharedBrowserMode) {
+      socket.emit("shared-browser-status");
+    }
+  }
 }
 
 // Close Browser Preview Modal
 function closeBrowserPreviewFn() {
   browserPreviewModal.classList.add("hidden");
+  // Stop auto-refresh when closing
+  if (autoRefreshEnabled) {
+    toggleAutoRefresh();
+  }
 }
 
 // Switch Browser Preview Tab
@@ -3912,9 +4514,20 @@ function switchBrowserPreviewTab(tabName) {
     .getElementById("browser-preview-html-tab")
     .classList.toggle("active", tabName === "html");
 
-  // Show/hide puppeteer controls
+  // Show/hide puppeteer controls and interaction bar
   if (puppeteerControls) {
     puppeteerControls.classList.toggle("hidden", tabName !== "puppeteer");
+  }
+  if (browserInteractionBar) {
+    browserInteractionBar.classList.toggle("hidden", tabName !== "puppeteer");
+  }
+
+  // Enable/disable nav buttons based on mode
+  updateNavButtons();
+
+  // Stop auto-refresh when leaving puppeteer mode
+  if (tabName !== "puppeteer" && autoRefreshEnabled) {
+    toggleAutoRefresh();
   }
 
   // Update URL bar placeholder based on mode
@@ -3985,6 +4598,9 @@ function navigatePuppeteer(url) {
   }
 
   browserPreviewUrlInput.value = validatedUrl;
+
+  // Track in history
+  pushBrowserHistory(validatedUrl);
 
   // Show loading state
   puppeteerScreenshot.classList.add("hidden");
@@ -4095,6 +4711,243 @@ function handleScreenshotClick(event) {
   socket.emit("browser-click", { x, y });
 }
 
+// ---- Back/Forward Navigation ----
+
+function updateNavButtons() {
+  if (browserBackBtn) {
+    browserBackBtn.disabled =
+      browserPreviewMode !== "puppeteer" || browserHistoryIndex <= 0;
+  }
+  if (browserForwardBtn) {
+    browserForwardBtn.disabled =
+      browserPreviewMode !== "puppeteer" ||
+      browserHistoryIndex >= browserHistoryStack.length - 1;
+  }
+}
+
+function pushBrowserHistory(url) {
+  // If we navigated from the middle of history, discard forward entries
+  if (browserHistoryIndex < browserHistoryStack.length - 1) {
+    browserHistoryStack = browserHistoryStack.slice(0, browserHistoryIndex + 1);
+  }
+  browserHistoryStack.push(url);
+  browserHistoryIndex = browserHistoryStack.length - 1;
+  updateNavButtons();
+}
+
+function browserGoBack() {
+  if (browserHistoryIndex <= 0) return;
+  browserHistoryIndex--;
+  const url = browserHistoryStack[browserHistoryIndex];
+  browserPreviewUrlInput.value = url;
+  updateBrowserStatus("Going back...");
+  socket.emit("browser-evaluate", {
+    script: "history.back()",
+  });
+  // Screenshot after a delay for the page to settle
+  setTimeout(() => {
+    takePuppeteerScreenshot();
+    fetchCurrentUrl();
+  }, 600);
+  updateNavButtons();
+}
+
+function browserGoForward() {
+  if (browserHistoryIndex >= browserHistoryStack.length - 1) return;
+  browserHistoryIndex++;
+  const url = browserHistoryStack[browserHistoryIndex];
+  browserPreviewUrlInput.value = url;
+  updateBrowserStatus("Going forward...");
+  socket.emit("browser-evaluate", {
+    script: "history.forward()",
+  });
+  setTimeout(() => {
+    takePuppeteerScreenshot();
+    fetchCurrentUrl();
+  }, 600);
+  updateNavButtons();
+}
+
+// Fetch current URL from the browser and update the URL bar
+function fetchCurrentUrl() {
+  socket.emit("browser-evaluate", {
+    script: "window.location.href",
+  });
+}
+
+// ---- Scroll ----
+
+function puppeteerScroll(direction) {
+  const amount = direction === "up" ? -400 : 400;
+  updateBrowserStatus(`Scrolling ${direction}...`);
+  socket.emit("browser-evaluate", {
+    script: `window.scrollBy(0, ${amount})`,
+  });
+  setTimeout(takePuppeteerScreenshot, 300);
+}
+
+// ---- Keyboard Input ----
+
+function sendKeyPress(key) {
+  updateBrowserStatus(`Pressing ${key}...`);
+  // Synthetic KeyboardEvents don't trigger default browser behavior,
+  // so we manually apply the effect for each key type.
+  socket.emit("browser-evaluate", {
+    script: `(function() {
+      var el = document.activeElement || document.body;
+      var tag = el.tagName;
+      var isInput = (tag === 'INPUT' || tag === 'TEXTAREA');
+      var isEditable = el.isContentEditable;
+      var key = ${JSON.stringify(key)};
+      var opts = { key: key, bubbles: true, cancelable: true };
+      el.dispatchEvent(new KeyboardEvent('keydown', opts));
+      el.dispatchEvent(new KeyboardEvent('keyup', opts));
+      if (key === 'Backspace') {
+        if (isInput) {
+          var start = el.selectionStart;
+          var end = el.selectionEnd;
+          if (start !== end) {
+            el.value = el.value.slice(0, start) + el.value.slice(end);
+            el.selectionStart = el.selectionEnd = start;
+          } else if (start > 0) {
+            el.value = el.value.slice(0, start - 1) + el.value.slice(start);
+            el.selectionStart = el.selectionEnd = start - 1;
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          return { action: 'backspace', tag: tag };
+        } else if (isEditable) {
+          document.execCommand('delete', false);
+          return { action: 'backspace-editable', tag: tag };
+        }
+      }
+      if (key === ' ') {
+        if (isInput) {
+          var s = el.selectionStart != null ? el.selectionStart : el.value.length;
+          el.value = el.value.slice(0, s) + ' ' + el.value.slice(s);
+          el.selectionStart = el.selectionEnd = s + 1;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          return { action: 'space', tag: tag };
+        } else if (isEditable) {
+          document.execCommand('insertText', false, ' ');
+          return { action: 'space-editable', tag: tag };
+        } else {
+          window.scrollBy(0, 100);
+          return { action: 'space-scroll' };
+        }
+      }
+      if (key === 'Enter') {
+        if (tag === 'TEXTAREA') {
+          var s2 = el.selectionStart != null ? el.selectionStart : el.value.length;
+          el.value = el.value.slice(0, s2) + '\\n' + el.value.slice(s2);
+          el.selectionStart = el.selectionEnd = s2 + 1;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          return { action: 'enter-newline', tag: tag };
+        } else if (tag === 'INPUT') {
+          var form = el.closest('form');
+          if (form) { form.requestSubmit ? form.requestSubmit() : form.submit(); }
+          return { action: 'enter-submit', tag: tag };
+        } else if (isEditable) {
+          document.execCommand('insertParagraph', false);
+          return { action: 'enter-editable', tag: tag };
+        } else {
+          el.click();
+          return { action: 'enter-click', tag: tag };
+        }
+      }
+      if (key === 'Tab') {
+        var focusable = Array.from(document.querySelectorAll(
+          'a[href],button,input,textarea,select,[tabindex]:not([tabindex=\\"-1\\"])'
+        )).filter(function(e) { return !e.disabled && e.offsetParent !== null; });
+        var idx = focusable.indexOf(el);
+        if (idx >= 0 && focusable[idx + 1]) {
+          focusable[idx + 1].focus();
+          return { action: 'tab', focused: focusable[idx + 1].tagName };
+        }
+        return { action: 'tab-noop' };
+      }
+      if (key === 'Escape') {
+        el.blur();
+        return { action: 'escape', tag: tag };
+      }
+      if (key.startsWith('Arrow')) {
+        if (isInput) {
+          var pos = el.selectionStart || 0;
+          if (key === 'ArrowLeft' && pos > 0) el.selectionStart = el.selectionEnd = pos - 1;
+          else if (key === 'ArrowRight' && pos < el.value.length) el.selectionStart = el.selectionEnd = pos + 1;
+          return { action: key, pos: el.selectionStart, tag: tag };
+        } else {
+          var dx = key === 'ArrowLeft' ? -40 : key === 'ArrowRight' ? 40 : 0;
+          var dy = key === 'ArrowUp' ? -40 : key === 'ArrowDown' ? 40 : 0;
+          window.scrollBy(dx, dy);
+          return { action: key + '-scroll' };
+        }
+      }
+      return { action: 'event-only', key: key, tag: tag };
+    })()`,
+  });
+  setTimeout(takePuppeteerScreenshot, 400);
+}
+
+// ---- Text Input ----
+
+function sendTextToFocused() {
+  const text = puppeteerTextInput ? puppeteerTextInput.value : "";
+  if (!text) {
+    showToast("Enter text to send");
+    return;
+  }
+  updateBrowserStatus(
+    `Typing "${text.substring(0, 20)}${text.length > 20 ? "..." : ""}"...`,
+  );
+  socket.emit("browser-evaluate", {
+    script: `(function() {
+      const el = document.activeElement;
+      if (!el || el === document.body) {
+        return { success: false, reason: 'No focused element' };
+      }
+      if ('value' in el) {
+        el.value += ${JSON.stringify(text)};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return { success: true, tagName: el.tagName, typed: ${JSON.stringify(text)} };
+      }
+      // For contenteditable
+      if (el.isContentEditable) {
+        document.execCommand('insertText', false, ${JSON.stringify(text)});
+        return { success: true, tagName: el.tagName, contentEditable: true };
+      }
+      return { success: false, reason: 'Element is not an input' };
+    })()`,
+  });
+  puppeteerTextInput.value = "";
+  setTimeout(takePuppeteerScreenshot, 300);
+}
+
+// ---- Auto-Refresh ----
+
+function toggleAutoRefresh() {
+  autoRefreshEnabled = !autoRefreshEnabled;
+
+  if (autoRefreshEnabled) {
+    const interval =
+      parseInt(autoRefreshIntervalSelect?.value || "3", 10) * 1000;
+    autoRefreshTimer = setInterval(takePuppeteerScreenshot, interval);
+    if (autoRefreshBtn) {
+      autoRefreshBtn.textContent = "🔄 Auto: ON";
+      autoRefreshBtn.classList.add("auto-active");
+    }
+    updateBrowserStatus(`Auto-refresh every ${interval / 1000}s`);
+  } else {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+    if (autoRefreshBtn) {
+      autoRefreshBtn.textContent = "🔄 Auto: OFF";
+      autoRefreshBtn.classList.remove("auto-active");
+    }
+    updateBrowserStatus("Auto-refresh stopped");
+  }
+}
+
 // Update browser status text
 function updateBrowserStatus(text) {
   if (browserPreviewStatusText) {
@@ -4141,6 +4994,120 @@ function addDevtoolsLog(content, isError = false) {
   entry.innerHTML = `<div class="${outputClass}">${escapeHtml(String(content))}</div>`;
   devtoolsOutput.appendChild(entry);
   devtoolsOutput.scrollTop = devtoolsOutput.scrollHeight;
+}
+
+// ============================================
+// Shared Browser Functions
+// ============================================
+
+function switchConnectionMode(mode) {
+  sharedBrowserMode = mode === "shared";
+  connectionModeButtons.forEach((btn) =>
+    btn.classList.toggle("active", btn.dataset.mode === mode),
+  );
+  if (sharedBrowserControls) {
+    sharedBrowserControls.classList.toggle("hidden", !sharedBrowserMode);
+  }
+  if (sharedBadge) {
+    sharedBadge.classList.toggle(
+      "hidden",
+      !sharedBrowserMode || !sharedBrowserRunning,
+    );
+  }
+
+  if (sharedBrowserMode) {
+    socket.emit("shared-browser-status");
+  } else {
+    socket.emit("shared-browser-disconnect");
+  }
+}
+
+function startSharedBrowser() {
+  if (sharedBrowserStartBtn) {
+    sharedBrowserStartBtn.disabled = true;
+    sharedBrowserStartBtn.textContent = "Starting...";
+  }
+  socket.emit("shared-browser-start", { headless: true });
+}
+
+function stopSharedBrowser() {
+  socket.emit("shared-browser-stop");
+}
+
+function updateSharedPages(pages) {
+  sharedBrowserPages = pages;
+  if (!sharedBrowserPageSelect) return;
+
+  sharedBrowserPageSelect.innerHTML = "";
+  if (pages.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No pages";
+    sharedBrowserPageSelect.appendChild(opt);
+  } else {
+    pages.forEach((p) => {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = `${p.title || "Untitled"} - ${p.url}`;
+      sharedBrowserPageSelect.appendChild(opt);
+    });
+  }
+  sharedBrowserPageSelect.classList.toggle("hidden", pages.length === 0);
+}
+
+function addActivityEntry(entry) {
+  browserActivityLog.push(entry);
+  if (browserActivityLog.length > 100) browserActivityLog.shift();
+  if (activityLogCount) {
+    activityLogCount.textContent = browserActivityLog.length;
+  }
+
+  if (!activityLogEntries) return;
+
+  const el = document.createElement("div");
+  el.className = `activity-entry activity-${entry.source}`;
+  const timeStr = new Date(entry.timestamp).toLocaleTimeString();
+  el.innerHTML = `<span class="activity-source ${entry.source}">${escapeHtml(entry.source)}</span><span class="activity-action">${escapeHtml(entry.action)}</span><span class="activity-detail">${escapeHtml(formatActivityDetail(entry))}</span><span class="activity-time">${timeStr}</span>`;
+  activityLogEntries.appendChild(el);
+  activityLogEntries.scrollTop = activityLogEntries.scrollHeight;
+}
+
+function formatActivityDetail(entry) {
+  const d = entry.details || {};
+  if (d.url) return d.url;
+  if (d.selector) return d.selector;
+  if (d.x !== undefined) return `(${d.x}, ${d.y})`;
+  if (d.text) return `"${d.text.substring(0, 30)}"`;
+  if (d.script) return d.script.substring(0, 50);
+  if (d.mode) return d.mode;
+  return "";
+}
+
+function toggleActivityLog() {
+  activityLogVisible = !activityLogVisible;
+  if (activityLogPanel) {
+    activityLogPanel.classList.toggle("hidden", !activityLogVisible);
+  }
+}
+
+function updateSharedBrowserUI(running) {
+  sharedBrowserRunning = running;
+  if (sharedBrowserStartBtn) {
+    sharedBrowserStartBtn.classList.toggle("hidden", running);
+    sharedBrowserStartBtn.disabled = false;
+    sharedBrowserStartBtn.textContent = "Start Chrome";
+  }
+  if (sharedBrowserStopBtn) {
+    sharedBrowserStopBtn.classList.toggle("hidden", !running);
+  }
+  if (sharedBrowserStatusIndicator) {
+    sharedBrowserStatusIndicator.className = running
+      ? "status-indicator connected"
+      : "status-indicator disconnected";
+  }
+  if (sharedBadge) {
+    sharedBadge.classList.toggle("hidden", !sharedBrowserMode || !running);
+  }
 }
 
 // Setup Browser Preview Socket Listeners
@@ -4191,6 +5158,19 @@ function setupBrowserPreviewSocketListeners() {
   socket.on("browser-evaluated", (data) => {
     console.log("Browser evaluated:", data);
     if (data.success) {
+      // Check if the result looks like a URL (from fetchCurrentUrl)
+      const resultStr =
+        typeof data.result === "string"
+          ? data.result
+          : JSON.stringify(data.result);
+      if (
+        resultStr &&
+        (resultStr.startsWith('"http://') || resultStr.startsWith('"https://'))
+      ) {
+        // Unwrap JSON string quotes
+        const url = resultStr.replace(/^"|"$/g, "");
+        browserPreviewUrlInput.value = url;
+      }
       addDevtoolsLog(JSON.stringify(data.result, null, 2));
     } else {
       addDevtoolsLog(data.error, true);
@@ -4212,6 +5192,79 @@ function setupBrowserPreviewSocketListeners() {
     updateBrowserStatus(`Error: ${data.message}`);
     puppeteerLoading.classList.add("hidden");
     showToast(`Browser error: ${data.message}`);
+  });
+
+  // ---- Shared Browser Events ----
+
+  socket.on("shared-browser-started", (data) => {
+    updateSharedBrowserUI(true);
+    updateSharedPages(data.pages || []);
+    showToast("Shared browser started");
+    // Auto-connect to shared mode
+    socket.emit("shared-browser-connect");
+  });
+
+  socket.on("shared-browser-stopped", () => {
+    updateSharedBrowserUI(false);
+    updateSharedPages([]);
+    showToast("Shared browser stopped");
+  });
+
+  socket.on("shared-browser-status", (data) => {
+    updateSharedBrowserUI(data.running);
+    if (data.running) {
+      updateSharedPages(data.pages || []);
+    }
+  });
+
+  socket.on("shared-browser-pages", (data) => {
+    updateSharedPages(data.pages || []);
+  });
+
+  socket.on("shared-browser-page-selected", (data) => {
+    if (data.page) {
+      currentSharedPageId = data.page.id;
+      browserPreviewUrlInput.value = data.page.url || "";
+      showToast(`Switched to: ${data.page.title || data.page.url}`);
+      takePuppeteerScreenshot();
+    }
+  });
+
+  socket.on("shared-browser-connected", () => {
+    showToast("Connected to shared browser");
+    updateBrowserStatus("Shared mode active");
+  });
+
+  socket.on("shared-browser-disconnected", () => {
+    updateBrowserStatus("MCP mode active");
+  });
+
+  socket.on("shared-browser-error", (data) => {
+    showToast(`Shared browser error: ${data.message}`);
+    if (sharedBrowserStartBtn) {
+      sharedBrowserStartBtn.disabled = false;
+      sharedBrowserStartBtn.textContent = "Start Chrome";
+    }
+  });
+
+  socket.on("shared-browser-crashed", () => {
+    showToast("Shared browser crashed - attempting restart...");
+  });
+
+  socket.on("shared-browser-restart-failed", () => {
+    updateSharedBrowserUI(false);
+    showToast("Shared browser restart failed - reverting to MCP mode");
+    switchConnectionMode("mcp");
+  });
+
+  socket.on("browser-activity", (entry) => {
+    addActivityEntry(entry);
+  });
+
+  socket.on("browser-activity-log", (data) => {
+    browserActivityLog = [];
+    if (activityLogEntries) activityLogEntries.innerHTML = "";
+    (data.entries || []).forEach((e) => addActivityEntry(e));
   });
 
   // Reset flag on disconnect
@@ -4359,6 +5412,83 @@ if (browserPreviewIframe) {
   browserPreviewIframe.onerror = () => {
     updateBrowserStatus("Failed to load");
   };
+}
+
+// Back/Forward navigation buttons
+if (browserBackBtn) {
+  browserBackBtn.onclick = browserGoBack;
+}
+if (browserForwardBtn) {
+  browserForwardBtn.onclick = browserGoForward;
+}
+
+// Scroll buttons
+if (puppeteerScrollUpBtn) {
+  puppeteerScrollUpBtn.onclick = () => puppeteerScroll("up");
+}
+if (puppeteerScrollDownBtn) {
+  puppeteerScrollDownBtn.onclick = () => puppeteerScroll("down");
+}
+
+// Keyboard buttons
+keyboardButtons.forEach((btn) => {
+  btn.onclick = () => sendKeyPress(btn.dataset.key);
+});
+
+// Text input - Send button
+if (puppeteerTextSendBtn) {
+  puppeteerTextSendBtn.onclick = sendTextToFocused;
+}
+
+// Text input - Enter to send
+if (puppeteerTextInput) {
+  puppeteerTextInput.onkeydown = (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      sendTextToFocused();
+    }
+  };
+}
+
+// Auto-refresh toggle
+if (autoRefreshBtn) {
+  autoRefreshBtn.onclick = toggleAutoRefresh;
+}
+
+// Auto-refresh interval change (restart timer if active)
+if (autoRefreshIntervalSelect) {
+  autoRefreshIntervalSelect.onchange = () => {
+    if (autoRefreshEnabled) {
+      // Restart with new interval
+      clearInterval(autoRefreshTimer);
+      const interval =
+        parseInt(autoRefreshIntervalSelect.value || "3", 10) * 1000;
+      autoRefreshTimer = setInterval(takePuppeteerScreenshot, interval);
+      updateBrowserStatus(`Auto-refresh every ${interval / 1000}s`);
+    }
+  };
+}
+
+// Shared Browser event handlers
+connectionModeButtons.forEach((btn) => {
+  btn.onclick = () => switchConnectionMode(btn.dataset.mode);
+});
+if (sharedBrowserStartBtn) {
+  sharedBrowserStartBtn.onclick = startSharedBrowser;
+}
+if (sharedBrowserStopBtn) {
+  sharedBrowserStopBtn.onclick = stopSharedBrowser;
+}
+if (sharedBrowserPageSelect) {
+  sharedBrowserPageSelect.onchange = () => {
+    const pageId = sharedBrowserPageSelect.value;
+    if (pageId) {
+      socket.emit("shared-browser-select-page", { pageId });
+    }
+  };
+}
+if (toggleActivityLogBtn) {
+  toggleActivityLogBtn.onclick = toggleActivityLog;
 }
 
 // Keyboard shortcut: Escape closes browser preview modals

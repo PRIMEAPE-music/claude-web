@@ -19,6 +19,7 @@ import {
   getBufferedResponse,
   clearBuffer,
   setSessionModel,
+  setBrowserWSEndpoint,
 } from "./claude-runner.js";
 import {
   readGraph,
@@ -27,6 +28,7 @@ import {
   invalidateCache as invalidateMemoryCache,
 } from "./memory-service.js";
 import * as puppeteerService from "./puppeteer-service.js";
+import { browserServer } from "./browser-server.js";
 import {
   initDatabase,
   listProjects,
@@ -75,18 +77,72 @@ const clientVisibility = new Map();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 const server = createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+  maxHttpBufferSize: 70 * 1024 * 1024, // 70MB to handle file transfers (50MB file + base64 overhead)
+  pingTimeout: 30000,
+});
+
+io.engine.on("connection_error", (err) => {
+  console.error("[socket] Connection error:", err.message);
+});
 
 const PORT = process.env.PORT || 3000;
 const HOME = homedir();
 const HISTORY_DIR = join(HOME, ".claude", "claude-web", "history");
 const UPLOADS_DIR = join(HOME, ".claude", "claude-web", "uploads");
+const TRANSFERS_DIR = join(HOME, "Uploads");
 const SCREENSHOTS_DIR = join(HOME, ".claude", "claude-web", "screenshots");
 const SCREENSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // Ensure directories exist
 mkdir(UPLOADS_DIR, { recursive: true }).catch(() => {});
+mkdir(TRANSFERS_DIR, { recursive: true }).catch(() => {});
 mkdir(SCREENSHOTS_DIR, { recursive: true }).catch(() => {});
+
+// ============================================
+// Shared Browser Activity Log
+// ============================================
+const ACTIVITY_LOG_MAX = 100;
+const browserActivityLog = [];
+
+function logBrowserActivity(source, action, details = {}) {
+  const entry = {
+    id: Date.now() + "-" + Math.random().toString(36).substr(2, 6),
+    timestamp: new Date().toISOString(),
+    source, // 'user' | 'claude'
+    action, // 'navigate' | 'click' | 'evaluate' | 'fill' | 'scroll' | 'keypress'
+    details, // { url, selector, coordinates, text, etc. }
+  };
+  browserActivityLog.push(entry);
+  if (browserActivityLog.length > ACTIVITY_LOG_MAX) {
+    browserActivityLog.shift();
+  }
+  // Broadcast to all connected clients
+  io.emit("browser-activity", entry);
+  return entry;
+}
+
+// Wire activity callback so puppeteerService can log activities
+puppeteerService.setActivityCallback(logBrowserActivity);
+
+// Wire browserServer events to update claude-runner and notify clients
+browserServer.on("started", ({ wsEndpoint }) => {
+  setBrowserWSEndpoint(wsEndpoint);
+});
+browserServer.on("stopped", () => {
+  setBrowserWSEndpoint(null);
+});
+browserServer.on("crashed", ({ code, signal }) => {
+  console.warn(
+    `[SharedBrowser] Chrome crashed (code=${code}, signal=${signal})`,
+  );
+  io.emit("shared-browser-crashed", { code, signal });
+});
+browserServer.on("restart-failed", () => {
+  console.error("[SharedBrowser] All restart attempts failed");
+  setBrowserWSEndpoint(null);
+  io.emit("shared-browser-restart-failed");
+});
 
 // Rate limiting configuration
 const RATE_LIMIT_WINDOW_MS =
@@ -473,6 +529,68 @@ io.on("connection", (socket) => {
     }
   });
 
+  // Handle file transfers (save to ~/Uploads/)
+  const MAX_TRANSFER_SIZE = 50 * 1024 * 1024; // 50MB
+
+  socket.on("file-transfer", async (data) => {
+    try {
+      const { name, type, size, data: fileData } = data;
+
+      if (!name || !fileData) {
+        socket.emit("file-transfer-error", {
+          message: "Missing file name or data",
+        });
+        return;
+      }
+
+      // Validate size
+      const estimatedSize = (fileData.length * 3) / 4;
+      if (estimatedSize > MAX_TRANSFER_SIZE) {
+        socket.emit("file-transfer-error", {
+          message: `File too large (max 50MB)`,
+        });
+        return;
+      }
+
+      // Sanitize filename - keep original name but remove path traversal
+      const safeName = name.replace(/[/\\]/g, "_").replace(/\.\./g, "_");
+
+      // Handle duplicate filenames by appending number
+      let filename = safeName;
+      let filepath = join(TRANSFERS_DIR, filename);
+      let counter = 1;
+      const ext = safeName.includes(".") ? "." + safeName.split(".").pop() : "";
+      const base = ext ? safeName.slice(0, -ext.length) : safeName;
+
+      while (true) {
+        try {
+          await stat(filepath);
+          // File exists, try next number
+          filename = `${base} (${counter})${ext}`;
+          filepath = join(TRANSFERS_DIR, filename);
+          counter++;
+        } catch {
+          // File doesn't exist, good to go
+          break;
+        }
+      }
+
+      // Decode base64 and save
+      const base64Data = fileData.replace(/^data:[^;]+;base64,/, "");
+      await writeFile(filepath, Buffer.from(base64Data, "base64"));
+
+      socket.emit("file-transfer-complete", {
+        filename,
+        path: filepath,
+        size: size,
+      });
+      console.log(`[${sessionId}] File transferred: ${filename} → ${filepath}`);
+    } catch (err) {
+      socket.emit("file-transfer-error", { message: err.message });
+      console.error(`File transfer error: ${err.message}`);
+    }
+  });
+
   socket.on("message", (data) => {
     if (!sessionId) {
       socket.emit("error", { message: "No active session" });
@@ -537,6 +655,36 @@ io.on("connection", (socket) => {
 
         taskContext += `</project-tasks>\n\n`;
         enhancedPrompt = taskContext + prompt;
+      }
+    }
+
+    // Inject recent browser activity context (shared mode only)
+    if (puppeteerService.getMode() === "shared") {
+      const now = Date.now();
+      const recentActions = browserActivityLog
+        .filter((a) => a.source === "user")
+        .filter((a) => now - new Date(a.timestamp).getTime() < 5 * 60 * 1000)
+        .slice(-10);
+
+      if (recentActions.length > 0) {
+        let browserContext = `<browser-context mode="shared">\n`;
+        browserContext += `Recent user browser actions:\n`;
+        for (const action of recentActions) {
+          const ago = Math.round(
+            (now - new Date(action.timestamp).getTime()) / 1000,
+          );
+          browserContext += `- [${ago}s ago] User ${action.action}`;
+          if (action.details.url) browserContext += ` to ${action.details.url}`;
+          if (action.details.selector)
+            browserContext += ` on "${action.details.selector}"`;
+          if (action.details.x !== undefined)
+            browserContext += ` at (${action.details.x}, ${action.details.y})`;
+          if (action.details.text)
+            browserContext += `: "${action.details.text.substring(0, 50)}"`;
+          browserContext += `\n`;
+        }
+        browserContext += `</browser-context>\n\n`;
+        enhancedPrompt = browserContext + enhancedPrompt;
       }
     }
 
@@ -962,6 +1110,7 @@ io.on("connection", (socket) => {
         return;
       }
       console.log(`[${sessionId || socket.id}] Browser: navigate to "${url}"`);
+      logBrowserActivity("user", "navigate", { url });
       const result = await puppeteerService.navigate(url);
       socket.emit("browser-navigated", result);
     } catch (err) {
@@ -1013,6 +1162,7 @@ io.on("connection", (socket) => {
         console.log(
           `[${sessionId || socket.id}] Browser: click at (${data.x}, ${data.y})`,
         );
+        logBrowserActivity("user", "click", { x: data.x, y: data.y });
         const result = await puppeteerService.clickAt(data.x, data.y);
         socket.emit("browser-clicked", result);
       } else if (data?.selector) {
@@ -1020,6 +1170,7 @@ io.on("connection", (socket) => {
         console.log(
           `[${sessionId || socket.id}] Browser: click "${data.selector}"`,
         );
+        logBrowserActivity("user", "click", { selector: data.selector });
         const result = await puppeteerService.click(data.selector);
         socket.emit("browser-clicked", result);
       } else {
@@ -1046,6 +1197,9 @@ io.on("connection", (socket) => {
       console.log(
         `[${sessionId || socket.id}] Browser: evaluate "${script.substring(0, 50)}..."`,
       );
+      logBrowserActivity("user", "evaluate", {
+        script: script.substring(0, 100),
+      });
       const result = await puppeteerService.evaluate(script);
       socket.emit("browser-evaluated", result);
     } catch (err) {
@@ -1067,6 +1221,10 @@ io.on("connection", (socket) => {
       console.log(
         `[${sessionId || socket.id}] Browser: fill "${selector}" with "${(value || "").substring(0, 20)}..."`,
       );
+      logBrowserActivity("user", "fill", {
+        selector,
+        text: (value || "").substring(0, 50),
+      });
       const result = await puppeteerService.fill(selector, value);
       socket.emit("browser-filled", result);
     } catch (err) {
@@ -1076,6 +1234,119 @@ io.on("connection", (socket) => {
       );
       socket.emit("browser-error", { message: err.message });
     }
+  });
+
+  // ============================================
+  // Shared Browser Management Events
+  // ============================================
+
+  socket.on("shared-browser-start", async (data) => {
+    try {
+      const headless = data?.headless ?? true;
+      if (browserServer.isRunning()) {
+        const pages = await browserServer.listPages();
+        socket.emit("shared-browser-started", {
+          wsEndpoint: browserServer.wsEndpoint,
+          pages,
+          alreadyRunning: true,
+        });
+        return;
+      }
+      browserServer.headless = headless;
+      await browserServer.start();
+      const pages = await browserServer.listPages();
+      io.emit("shared-browser-started", {
+        wsEndpoint: browserServer.wsEndpoint,
+        pages,
+      });
+    } catch (err) {
+      console.error("[SharedBrowser] Start error:", err.message);
+      socket.emit("shared-browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("shared-browser-stop", async () => {
+    try {
+      await puppeteerService.switchToMCP();
+      await browserServer.stop();
+      io.emit("shared-browser-stopped");
+    } catch (err) {
+      console.error("[SharedBrowser] Stop error:", err.message);
+      socket.emit("shared-browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("shared-browser-status", async () => {
+    try {
+      const running = browserServer.isRunning();
+      const mode = puppeteerService.getMode();
+      let pages = [];
+      if (running) {
+        pages = await browserServer.listPages();
+      }
+      socket.emit("shared-browser-status", {
+        running,
+        mode,
+        wsEndpoint: browserServer.wsEndpoint,
+        pages,
+      });
+    } catch (err) {
+      socket.emit("shared-browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("shared-browser-list-pages", async () => {
+    try {
+      const pages = await browserServer.listPages();
+      socket.emit("shared-browser-pages", { pages });
+    } catch (err) {
+      socket.emit("shared-browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("shared-browser-select-page", async (data) => {
+    try {
+      const result = await puppeteerService.selectPage(data?.pageId);
+      if (result.success) {
+        socket.emit("shared-browser-page-selected", { page: result.page });
+      } else {
+        socket.emit("shared-browser-error", {
+          message: result.error || "Page not found",
+        });
+      }
+    } catch (err) {
+      socket.emit("shared-browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("shared-browser-connect", async () => {
+    try {
+      const result = await puppeteerService.switchToShared();
+      if (result.success) {
+        socket.emit("shared-browser-connected");
+        logBrowserActivity("system", "connected", { mode: "shared" });
+      } else {
+        socket.emit("shared-browser-error", {
+          message: result.error || "Failed to connect",
+        });
+      }
+    } catch (err) {
+      socket.emit("shared-browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("shared-browser-disconnect", async () => {
+    try {
+      await puppeteerService.switchToMCP();
+      socket.emit("shared-browser-disconnected");
+      logBrowserActivity("system", "disconnected", { mode: "mcp" });
+    } catch (err) {
+      socket.emit("shared-browser-error", { message: err.message });
+    }
+  });
+
+  socket.on("browser-activity-list", () => {
+    socket.emit("browser-activity-log", { entries: browserActivityLog });
   });
 
   // ============================================

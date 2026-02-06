@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
     />
     <meta name="theme-color" content="#0a110c" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -19,6 +19,10 @@
       href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css"
     />
     <link rel="manifest" href="manifest.json" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png" />
   </head>
   <body>
     <div id="app">
@@ -991,7 +995,7 @@
               <ul>
                 <li>Tap ⋮ in header for tools menu</li>
                 <li>Tap ☰ for menu and file browser</li>
-                <li>Tap the mic button for voice input</li>
+                <li>Use the attachment button to upload files</li>
                 <li>Long-press code blocks to copy</li>
               </ul>
             </div>
@@ -1016,9 +1020,6 @@
 
         <!-- Input Area -->
         <div id="input-area">
-          <button id="voice-btn" class="icon-btn" title="Voice input">
-            🎤
-          </button>
           <div id="upload-menu-wrapper">
             <button id="upload-btn" class="icon-btn" title="Upload file">
               📎
