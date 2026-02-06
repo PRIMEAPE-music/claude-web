@@ -6,7 +6,7 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
-    <meta name="theme-color" content="#1a1a2e" />
+    <meta name="theme-color" content="#0a110c" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta
       name="apple-mobile-web-app-status-bar-style"
@@ -411,8 +411,74 @@
               <button class="browser-preview-tab" data-tab="html">HTML</button>
             </div>
 
-            <!-- URL Bar -->
+            <!-- Shared Browser Controls -->
+            <div class="shared-browser-bar">
+              <div class="connection-mode-toggle">
+                <button
+                  class="mode-btn active"
+                  data-mode="mcp"
+                  title="MCP Server mode (separate browser)"
+                >
+                  MCP
+                </button>
+                <button
+                  class="mode-btn"
+                  data-mode="shared"
+                  title="Shared browser (same Chrome for you and Claude)"
+                >
+                  Shared
+                </button>
+              </div>
+              <div id="shared-browser-controls" class="hidden">
+                <button
+                  id="shared-browser-start-btn"
+                  class="toolbar-btn"
+                  title="Start shared Chrome"
+                >
+                  Start Chrome
+                </button>
+                <button
+                  id="shared-browser-stop-btn"
+                  class="toolbar-btn hidden"
+                  title="Stop shared Chrome"
+                >
+                  Stop
+                </button>
+                <select
+                  id="shared-browser-page-select"
+                  class="page-select hidden"
+                  title="Select page/tab"
+                >
+                  <option value="">No pages</option>
+                </select>
+                <span
+                  id="shared-browser-status-indicator"
+                  class="status-indicator disconnected"
+                ></span>
+              </div>
+              <span id="shared-badge" class="shared-badge hidden">SHARED</span>
+            </div>
+
+            <!-- URL Bar with Navigation -->
             <div class="browser-preview-url-bar">
+              <div class="browser-nav-buttons">
+                <button
+                  id="browser-back-btn"
+                  class="nav-btn icon-btn"
+                  title="Back"
+                  disabled
+                >
+                  ◀
+                </button>
+                <button
+                  id="browser-forward-btn"
+                  class="nav-btn icon-btn"
+                  title="Forward"
+                  disabled
+                >
+                  ▶
+                </button>
+              </div>
               <input
                 type="text"
                 id="browser-preview-url"
@@ -513,18 +579,137 @@
                   class="toolbar-btn"
                   title="Click mode - click on screenshot to interact"
                 >
-                  👆 Click Mode
+                  👆 Click
+                </button>
+                <button
+                  id="puppeteer-scroll-up"
+                  class="toolbar-btn"
+                  title="Scroll up"
+                >
+                  ⬆ Up
+                </button>
+                <button
+                  id="puppeteer-scroll-down"
+                  class="toolbar-btn"
+                  title="Scroll down"
+                >
+                  ⬇ Down
                 </button>
                 <button
                   id="puppeteer-devtools"
                   class="toolbar-btn"
                   title="Open DevTools"
                 >
-                  🔧 DevTools
+                  🔧 Dev
                 </button>
               </div>
               <div class="browser-preview-status">
                 <span id="browser-preview-status-text"></span>
+              </div>
+            </div>
+
+            <!-- Interaction Bar (Puppeteer mode only) -->
+            <div
+              id="browser-interaction-bar"
+              class="browser-interaction-bar hidden"
+            >
+              <!-- Keyboard Row -->
+              <div class="interaction-row">
+                <span class="interaction-label">Keys:</span>
+                <div class="keyboard-buttons">
+                  <button class="key-btn" data-key="Enter" title="Enter">
+                    Enter
+                  </button>
+                  <button class="key-btn" data-key="Escape" title="Escape">
+                    Esc
+                  </button>
+                  <button class="key-btn" data-key="Tab" title="Tab">
+                    Tab
+                  </button>
+                  <button class="key-btn" data-key="ArrowUp" title="Arrow Up">
+                    ↑
+                  </button>
+                  <button
+                    class="key-btn"
+                    data-key="ArrowDown"
+                    title="Arrow Down"
+                  >
+                    ↓
+                  </button>
+                  <button
+                    class="key-btn"
+                    data-key="ArrowLeft"
+                    title="Arrow Left"
+                  >
+                    ←
+                  </button>
+                  <button
+                    class="key-btn"
+                    data-key="ArrowRight"
+                    title="Arrow Right"
+                  >
+                    →
+                  </button>
+                  <button
+                    class="key-btn"
+                    data-key="Backspace"
+                    title="Backspace"
+                  >
+                    ⌫
+                  </button>
+                  <button class="key-btn" data-key=" " title="Space">
+                    Space
+                  </button>
+                </div>
+              </div>
+              <!-- Text Input Row -->
+              <div class="interaction-row">
+                <span class="interaction-label">Type:</span>
+                <input
+                  type="text"
+                  id="puppeteer-text-input"
+                  class="puppeteer-text-input"
+                  placeholder="Type text into focused element..."
+                />
+                <button
+                  id="puppeteer-text-send"
+                  class="toolbar-btn"
+                  title="Send text to focused element"
+                >
+                  Send
+                </button>
+                <div class="interaction-divider"></div>
+                <button
+                  id="puppeteer-auto-refresh"
+                  class="toolbar-btn"
+                  title="Auto-refresh screenshot periodically"
+                >
+                  🔄 Auto: OFF
+                </button>
+                <select
+                  id="puppeteer-auto-refresh-interval"
+                  class="auto-refresh-select"
+                  title="Refresh interval"
+                >
+                  <option value="1">1s</option>
+                  <option value="2">2s</option>
+                  <option value="3" selected>3s</option>
+                  <option value="5">5s</option>
+                  <option value="10">10s</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- Activity Log (collapsible) -->
+            <div class="activity-log-container">
+              <button id="toggle-activity-log" class="activity-log-toggle">
+                Activity Log
+                <span id="activity-log-count" class="activity-count">0</span>
+              </button>
+              <div id="activity-log-panel" class="activity-log-panel hidden">
+                <div id="activity-log-entries" class="activity-log-entries">
+                  <!-- Activity entries rendered by JS -->
+                </div>
               </div>
             </div>
           </div>
@@ -834,9 +1019,19 @@
           <button id="voice-btn" class="icon-btn" title="Voice input">
             🎤
           </button>
-          <button id="upload-btn" class="icon-btn" title="Upload image">
-            📷
-          </button>
+          <div id="upload-menu-wrapper">
+            <button id="upload-btn" class="icon-btn" title="Upload file">
+              📎
+            </button>
+            <div id="upload-menu" class="hidden">
+              <button id="upload-attach" class="upload-menu-item">
+                <span>🖼</span> Attach to message
+              </button>
+              <button id="upload-save" class="upload-menu-item">
+                <span>💾</span> Save to computer
+              </button>
+            </div>
+          </div>
           <input
             type="file"
             id="file-upload"
@@ -844,6 +1039,7 @@
             multiple
             hidden
           />
+          <input type="file" id="file-transfer" multiple hidden />
           <div id="input-wrapper">
             <div id="image-preview-area" class="hidden"></div>
             <textarea
