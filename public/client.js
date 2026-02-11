@@ -105,6 +105,7 @@ let isPageVisible = !document.hidden;
 
 // Capacitor native notification support
 const isCapacitor = !!window.Capacitor?.isNativePlatform?.();
+let backgroundServiceRunning = false;
 let capacitorNotificationsReady = false;
 let capacitorNotificationId = 1;
 let capacitorSetupPromise = null;
@@ -178,6 +179,50 @@ async function showCapacitorNotification(title, body) {
   } catch (err) {
     console.error("[Capacitor] Failed to show notification:", err);
     return false;
+  }
+}
+
+// Capacitor foreground service — keeps WebView alive when app is backgrounded
+async function startBackgroundService(body) {
+  if (!isCapacitor || backgroundServiceRunning) return;
+  try {
+    const BackgroundService = window.Capacitor?.Plugins?.BackgroundService;
+    if (!BackgroundService) return;
+    await BackgroundService.start({
+      title: "Claude Web",
+      body: body || "Connected — staying active in background",
+    });
+    backgroundServiceRunning = true;
+    console.log("[Capacitor] Background service started");
+  } catch (err) {
+    console.error("[Capacitor] Failed to start background service:", err);
+  }
+}
+
+async function stopBackgroundService() {
+  if (!isCapacitor || !backgroundServiceRunning) return;
+  try {
+    const BackgroundService = window.Capacitor?.Plugins?.BackgroundService;
+    if (!BackgroundService) return;
+    await BackgroundService.stop();
+    backgroundServiceRunning = false;
+    console.log("[Capacitor] Background service stopped");
+  } catch (err) {
+    console.error("[Capacitor] Failed to stop background service:", err);
+  }
+}
+
+async function updateBackgroundService(body) {
+  if (!isCapacitor || !backgroundServiceRunning) return;
+  try {
+    const BackgroundService = window.Capacitor?.Plugins?.BackgroundService;
+    if (!BackgroundService) return;
+    await BackgroundService.update({
+      title: "Claude Web",
+      body: body || "Connected — staying active in background",
+    });
+  } catch (err) {
+    console.error("[Capacitor] Failed to update background service:", err);
   }
 }
 
@@ -432,6 +477,9 @@ function connect(token) {
     status.classList.add("connected");
     sendBtn.disabled = false;
     updateActionsBarState(); // Enable quick actions bar buttons
+
+    // Start foreground service on Capacitor to prevent background kill
+    startBackgroundService("Connected to server");
 
     // Try to restore previous session, or start a new one
     if (currentSessionId) {
@@ -6729,9 +6777,6 @@ function loadActiveProject() {
 
 let phoneConnected = false;
 
-const phoneWidget = document.getElementById("phone-widget");
-const phoneStatusDot = document.getElementById("phone-status-dot");
-const phoneStatusText = document.getElementById("phone-status-text");
 const phoneIpInput = document.getElementById("phone-ip");
 const phonePortInput = document.getElementById("phone-port");
 const phoneConnectBtn = document.getElementById("phone-connect-btn");
@@ -6739,11 +6784,8 @@ const phoneDeviceBadge = document.getElementById("phone-device-badge");
 
 function updatePhoneUI(connected, deviceInfo) {
   phoneConnected = connected;
-  if (phoneWidget) phoneWidget.style.display = "flex";
 
   if (connected) {
-    if (phoneStatusDot) phoneStatusDot.className = "status-dot connected";
-    if (phoneStatusText) phoneStatusText.textContent = "Phone";
     if (phoneConnectBtn) {
       phoneConnectBtn.textContent = "Disconnect";
       phoneConnectBtn.classList.add("danger-btn");
@@ -6754,8 +6796,6 @@ function updatePhoneUI(connected, deviceInfo) {
       phoneDeviceBadge.style.display = "block";
     }
   } else {
-    if (phoneStatusDot) phoneStatusDot.className = "status-dot disconnected";
-    if (phoneStatusText) phoneStatusText.textContent = "Phone";
     if (phoneConnectBtn) {
       phoneConnectBtn.textContent = "Connect";
       phoneConnectBtn.classList.remove("danger-btn");
@@ -6794,28 +6834,19 @@ if (phoneIpInput) {
   });
 }
 
-if (phoneWidget) {
-  phoneWidget.addEventListener("click", () => {
-    // Open settings modal and scroll to phone section
-    const settingsModal = document.getElementById("settings-modal");
-    if (settingsModal) {
-      settingsModal.classList.remove("hidden");
-      const phoneSection = document.querySelector(".phone-settings");
-      if (phoneSection) phoneSection.scrollIntoView({ behavior: "smooth" });
-    }
-  });
-}
-
 // Socket listeners for phone
 function setupPhoneSocketListeners() {
   if (!socket) return;
 
   socket.on("phone-connected", (data) => {
     updatePhoneUI(true, data.deviceInfo);
+    const model = data.deviceInfo?.model || "phone";
+    updateBackgroundService(`Phone connected — ${model}`);
   });
 
   socket.on("phone-disconnected", () => {
     updatePhoneUI(false);
+    updateBackgroundService("Connected to server");
   });
 
   socket.on("phone-status", (data) => {
@@ -6851,9 +6882,6 @@ function setupPhoneSocketListeners() {
   // On connect, check phone status and load saved config
   socket.emit("phone-status");
   socket.emit("phone-get-config");
-
-  // Show the widget now that listeners are set up
-  if (phoneWidget) phoneWidget.style.display = "flex";
 }
 
 // Initialize phone listeners when socket is ready

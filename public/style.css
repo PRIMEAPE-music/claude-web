@@ -5684,33 +5684,6 @@ body.light-theme #upload-menu {
 }
 
 /* ===== Phone Control ===== */
-.phone-widget {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 0.75em;
-  opacity: 0.8;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 4px;
-  transition: opacity 0.2s;
-}
-.phone-widget:hover {
-  opacity: 1;
-}
-.phone-widget .status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.phone-widget .status-dot.connected {
-  background: #4ade80;
-  box-shadow: 0 0 4px #4ade8066;
-}
-.phone-widget .status-dot.disconnected {
-  background: var(--text-muted, #666);
-}
 .phone-connection-row {
   display: flex;
   gap: 6px;
