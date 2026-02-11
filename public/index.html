@@ -52,6 +52,18 @@
             <span id="working-dir" title="Working directory">~</span>
           </div>
           <div class="header-right">
+            <div
+              id="phone-widget"
+              class="phone-widget"
+              style="display: none"
+              title="Phone Control"
+            >
+              <span
+                id="phone-status-dot"
+                class="status-dot disconnected"
+              ></span>
+              <span id="phone-status-text">Phone</span>
+            </div>
             <span id="status" title="Connection status">●</span>
             <div class="header-dropdown">
               <button
@@ -296,6 +308,30 @@
                 <input type="checkbox" id="push-enabled" checked />
                 Push notifications (when screen off)
               </label>
+            </div>
+
+            <div class="setting-group phone-settings">
+              <label>Phone Control (ADB over Tailscale)</label>
+              <div class="phone-connection-row">
+                <input
+                  id="phone-ip"
+                  type="text"
+                  placeholder="Tailscale IP"
+                  spellcheck="false"
+                />
+                <input
+                  id="phone-port"
+                  type="text"
+                  placeholder="5555"
+                  value="5555"
+                />
+                <button id="phone-connect-btn" class="url-btn">Connect</button>
+              </div>
+              <div
+                id="phone-device-badge"
+                class="phone-device-badge"
+                style="display: none"
+              ></div>
             </div>
 
             <div class="setting-group">

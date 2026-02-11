@@ -6722,3 +6722,149 @@ function loadActiveProject() {
     socket.emit("project-get-active");
   }
 }
+
+// ============================================
+// Phone Control
+// ============================================
+
+let phoneConnected = false;
+
+const phoneWidget = document.getElementById("phone-widget");
+const phoneStatusDot = document.getElementById("phone-status-dot");
+const phoneStatusText = document.getElementById("phone-status-text");
+const phoneIpInput = document.getElementById("phone-ip");
+const phonePortInput = document.getElementById("phone-port");
+const phoneConnectBtn = document.getElementById("phone-connect-btn");
+const phoneDeviceBadge = document.getElementById("phone-device-badge");
+
+function updatePhoneUI(connected, deviceInfo) {
+  phoneConnected = connected;
+  if (phoneWidget) phoneWidget.style.display = "flex";
+
+  if (connected) {
+    if (phoneStatusDot) phoneStatusDot.className = "status-dot connected";
+    if (phoneStatusText) phoneStatusText.textContent = "Phone";
+    if (phoneConnectBtn) {
+      phoneConnectBtn.textContent = "Disconnect";
+      phoneConnectBtn.classList.add("danger-btn");
+      phoneConnectBtn.classList.remove("url-btn");
+    }
+    if (deviceInfo && phoneDeviceBadge) {
+      phoneDeviceBadge.textContent = `${deviceInfo.model} \u2022 Android ${deviceInfo.version} \u2022 ${deviceInfo.battery}% \u2022 ${deviceInfo.width}\u00d7${deviceInfo.height}`;
+      phoneDeviceBadge.style.display = "block";
+    }
+  } else {
+    if (phoneStatusDot) phoneStatusDot.className = "status-dot disconnected";
+    if (phoneStatusText) phoneStatusText.textContent = "Phone";
+    if (phoneConnectBtn) {
+      phoneConnectBtn.textContent = "Connect";
+      phoneConnectBtn.classList.remove("danger-btn");
+      phoneConnectBtn.classList.add("url-btn");
+    }
+    if (phoneDeviceBadge) phoneDeviceBadge.style.display = "none";
+  }
+}
+
+function connectPhone() {
+  const ip = phoneIpInput?.value?.trim();
+  const port = phonePortInput?.value?.trim() || "5555";
+  if (!ip) return;
+  if (phoneConnectBtn) phoneConnectBtn.textContent = "Connecting...";
+  socket.emit("phone-connect", { ip, port });
+}
+
+function disconnectPhone() {
+  socket.emit("phone-disconnect");
+}
+
+// Event listeners
+if (phoneConnectBtn) {
+  phoneConnectBtn.addEventListener("click", () => {
+    if (phoneConnected) {
+      disconnectPhone();
+    } else {
+      connectPhone();
+    }
+  });
+}
+
+if (phoneIpInput) {
+  phoneIpInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !phoneConnected) connectPhone();
+  });
+}
+
+if (phoneWidget) {
+  phoneWidget.addEventListener("click", () => {
+    // Open settings modal and scroll to phone section
+    const settingsModal = document.getElementById("settings-modal");
+    if (settingsModal) {
+      settingsModal.classList.remove("hidden");
+      const phoneSection = document.querySelector(".phone-settings");
+      if (phoneSection) phoneSection.scrollIntoView({ behavior: "smooth" });
+    }
+  });
+}
+
+// Socket listeners for phone
+function setupPhoneSocketListeners() {
+  if (!socket) return;
+
+  socket.on("phone-connected", (data) => {
+    updatePhoneUI(true, data.deviceInfo);
+  });
+
+  socket.on("phone-disconnected", () => {
+    updatePhoneUI(false);
+  });
+
+  socket.on("phone-status", (data) => {
+    if (data.connected) {
+      // Already connected — fetch device info to populate UI
+      socket.emit("phone-device-info");
+    }
+    updatePhoneUI(data.connected);
+  });
+
+  socket.on("phone-device-info", (data) => {
+    if (data.deviceInfo && phoneConnected) {
+      updatePhoneUI(true, data.deviceInfo);
+    }
+  });
+
+  socket.on("phone-config", (data) => {
+    if (data.config?.ip && phoneIpInput) {
+      phoneIpInput.value = data.config.ip;
+    }
+    if (data.config?.port && phonePortInput) {
+      phonePortInput.value = data.config.port;
+    }
+  });
+
+  socket.on("phone-error", (data) => {
+    if (phoneConnectBtn) {
+      phoneConnectBtn.textContent = phoneConnected ? "Disconnect" : "Connect";
+    }
+    console.error("[phone]", data.message);
+  });
+
+  // On connect, check phone status and load saved config
+  socket.emit("phone-status");
+  socket.emit("phone-get-config");
+
+  // Show the widget now that listeners are set up
+  if (phoneWidget) phoneWidget.style.display = "flex";
+}
+
+// Initialize phone listeners when socket is ready
+if (socket) {
+  setupPhoneSocketListeners();
+} else {
+  // If socket isn't ready yet, wait for it
+  const phoneInitInterval = setInterval(() => {
+    if (socket) {
+      setupPhoneSocketListeners();
+      clearInterval(phoneInitInterval);
+    }
+  }, 500);
+}

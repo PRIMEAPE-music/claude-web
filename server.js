@@ -28,6 +28,7 @@ import {
   invalidateCache as invalidateMemoryCache,
 } from "./memory-service.js";
 import * as puppeteerService from "./puppeteer-service.js";
+import * as phoneService from "./phone-service.js";
 import { browserServer } from "./browser-server.js";
 import {
   initDatabase,
@@ -618,7 +619,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("message", (data) => {
+  socket.on("message", async (data) => {
     if (!sessionId) {
       socket.emit("error", { message: "No active session" });
       return;
@@ -712,6 +713,42 @@ io.on("connection", (socket) => {
         }
         browserContext += `</browser-context>\n\n`;
         enhancedPrompt = browserContext + enhancedPrompt;
+      }
+    }
+
+    // Inject phone context when connected via ADB
+    if (phoneService.isConnected()) {
+      try {
+        const [deviceInfo, phoneConfig] = await Promise.all([
+          phoneService.getDeviceInfo(),
+          phoneService.loadConfig(),
+        ]);
+        const serial = `${phoneConfig.ip}:${phoneConfig.port || 5555}`;
+        let phoneContext = `<phone-context>\n`;
+        phoneContext += `Android phone connected via ADB over Tailscale.\n`;
+        phoneContext += `Device: ${deviceInfo.model} (Android ${deviceInfo.version})\n`;
+        phoneContext += `Resolution: ${deviceInfo.width}x${deviceInfo.height}\n`;
+        phoneContext += `Battery: ${deviceInfo.battery}%\n`;
+        phoneContext += `ADB serial: ${serial}\n`;
+        phoneContext += `App package: com.primeape.claudeweb\n\n`;
+        phoneContext += `You can control this phone using:\n`;
+        phoneContext += `- Appium MCP tools (appium_screenshot, appium_find_element, appium_click, etc.) for structured UI interaction\n`;
+        phoneContext += `- ADB via Bash for system commands (wake, logcat, deploy, install, etc.)\n`;
+        phoneContext += `- ADB path: /home/primeape/Android/Sdk/platform-tools/adb\n\n`;
+        phoneContext += `IMPORTANT behaviors:\n`;
+        phoneContext += `- Before interacting with the screen, wake it: adb -s ${serial} shell input keyevent KEYCODE_WAKEUP\n`;
+        phoneContext += `- After completing actions, ALWAYS bring claude-web back to foreground:\n`;
+        phoneContext += `  adb -s ${serial} shell am start -n com.primeape.claudeweb/.MainActivity\n`;
+        phoneContext += `- Use appium_get_page_source to understand what's on screen (returns XML UI tree)\n`;
+        phoneContext += `- Use appium_screenshot to show the user what the phone looks like\n`;
+        phoneContext += `- For multi-step tasks, take a screenshot between each step to verify progress\n`;
+        phoneContext += `</phone-context>\n\n`;
+        enhancedPrompt = phoneContext + enhancedPrompt;
+      } catch (err) {
+        console.error(
+          "[phone-context] Failed to get device info:",
+          err.message,
+        );
       }
     }
 
@@ -1384,6 +1421,88 @@ io.on("connection", (socket) => {
 
   socket.on("browser-activity-list", () => {
     socket.emit("browser-activity-log", { entries: browserActivityLog });
+  });
+
+  // ============================================
+  // Phone Control Events
+  // ============================================
+
+  socket.on("phone-connect", async (data) => {
+    try {
+      const { ip, port } = data;
+      if (!ip || !/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+        socket.emit("phone-error", { message: "Invalid IP address" });
+        return;
+      }
+      const result = await phoneService.connect(ip, parseInt(port, 10) || 5555);
+      await phoneService.wakeScreen();
+      await phoneService.keepScreenAwake();
+      const deviceInfo = await phoneService.getDeviceInfo();
+      socket.emit("phone-connected", { ...result, deviceInfo });
+      console.log(`[phone] Connected to ${ip}:${port || 5555}`);
+    } catch (err) {
+      socket.emit("phone-error", { message: err.message });
+    }
+  });
+
+  socket.on("phone-disconnect", async () => {
+    try {
+      await phoneService.disconnect();
+      socket.emit("phone-disconnected");
+      console.log("[phone] Disconnected");
+    } catch (err) {
+      socket.emit("phone-error", { message: err.message });
+    }
+  });
+
+  socket.on("phone-status", () => {
+    socket.emit("phone-status", { connected: phoneService.isConnected() });
+  });
+
+  socket.on("phone-wake", async () => {
+    try {
+      await phoneService.wakeScreen();
+      socket.emit("phone-woke");
+    } catch (err) {
+      socket.emit("phone-error", { message: err.message });
+    }
+  });
+
+  socket.on("phone-return", async () => {
+    try {
+      await phoneService.returnToClaudeWeb();
+      socket.emit("phone-returned");
+    } catch (err) {
+      socket.emit("phone-error", { message: err.message });
+    }
+  });
+
+  socket.on("phone-logcat", async (data) => {
+    try {
+      const { filter, lines } = data || {};
+      const result = await phoneService.streamLogcat(filter, lines);
+      socket.emit("phone-logcat-result", { log: result });
+    } catch (err) {
+      socket.emit("phone-error", { message: err.message });
+    }
+  });
+
+  socket.on("phone-device-info", async () => {
+    try {
+      const deviceInfo = await phoneService.getDeviceInfo();
+      socket.emit("phone-device-info", { deviceInfo });
+    } catch (err) {
+      socket.emit("phone-error", { message: err.message });
+    }
+  });
+
+  socket.on("phone-get-config", async () => {
+    try {
+      const config = await phoneService.loadConfig();
+      socket.emit("phone-config", { config });
+    } catch (err) {
+      socket.emit("phone-error", { message: err.message });
+    }
   });
 
   // ============================================
