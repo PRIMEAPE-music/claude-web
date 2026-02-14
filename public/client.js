@@ -1213,7 +1213,6 @@ function connect(token) {
   socket.on("conversation-saved", (data) => {
     currentConversationId = data.id;
     localStorage.setItem("claude-web-conversationId", currentConversationId);
-    showToast("Conversation saved");
     socket.emit("list-conversations");
   });
 
@@ -2578,7 +2577,7 @@ function updateAgentPill() {
     pill.id = "agent-pill";
     pill.className = "agent-pill";
     pill.onclick = toggleAgentSheet;
-    document.getElementById("chat-screen").appendChild(pill);
+    document.getElementById("quick-actions-bar").appendChild(pill);
   }
 
   // Update pill content

@@ -2787,7 +2787,7 @@ body.light-theme .term-footer {
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border-top: var(--glass-border);
   box-shadow: var(--glass-inner-glow);
-  overflow: hidden;
+  overflow: visible;
   position: relative;
   z-index: 49;
 }
@@ -4979,9 +4979,10 @@ body.light-theme .term-footer {
 
 /* Floating Agent Pill */
 .agent-pill {
-  position: fixed;
-  bottom: 140px;
+  position: absolute;
+  bottom: 100%;
   right: 16px;
+  margin-bottom: 8px;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -5199,7 +5200,6 @@ body.light-theme .term-footer {
 /* Mobile adjustments */
 @media (max-width: 600px) {
   .agent-pill {
-    bottom: 120px;
     right: 12px;
     padding: 6px 12px;
   }
